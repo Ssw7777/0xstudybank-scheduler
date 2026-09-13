@@ -8,7 +8,7 @@ dashboard credentials, or application source code.
 
 - Every five minutes, one fast refresh reads the three configured exchanges and
   records exactly one portfolio snapshot.
-- During the same cycle, five wallet-only micro-batches run about one minute
+- During the same cycle, five wallet-only micro-batches run about 50 seconds
   apart. Each batch refreshes at most three least-recently-attempted wallets.
 - Two consecutive cycles therefore form a continuously repeating ten-batch
   window, enough to rotate through the current 25-wallet set without sending a

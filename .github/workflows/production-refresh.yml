@@ -24,7 +24,7 @@ jobs:
       WALLET_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=3"
       STATUS_URL: https://0xstudybank.vercel.app/api/status
       BATCH_COUNT: "5"
-      BATCH_INTERVAL_SECONDS: "60"
+      BATCH_INTERVAL_SECONDS: "50"
     steps:
       - name: Refresh exchanges, snapshot, and rolling wallet batches
         shell: bash
@@ -80,9 +80,12 @@ jobs:
             LABEL="$label" BODY_FILE="$body_file" node <<'NODE'
           const fs = require("fs");
           const payload = JSON.parse(fs.readFileSync(process.env.BODY_FILE, "utf8"));
-          const accepted = payload.ok === true || payload.skipped === "refresh_in_progress";
+          const isWalletBatch = process.env.LABEL.startsWith("wallet-batch-");
+          const skipped = payload.skipped === "refresh_in_progress" || payload.reason === "refresh_in_progress";
+          const batchWorked = !isWalletBatch || (Number(payload.batchAttempted) > 0 && Number(payload.batchSucceeded) > 0);
+          const accepted = payload.ok === true && !skipped && batchWorked;
           if (!accepted) process.exit(1);
-          const state = payload.skipped ? "skipped-active-lease" : (payload.refreshStatus || "accepted");
+          const state = payload.refreshStatus || "accepted";
           console.log(`${process.env.LABEL}: ${state}`);
           NODE
           }
@@ -127,7 +130,18 @@ jobs:
             process.exit(1);
           }
           if (!Number.isInteger(status.snapshotCount) || status.snapshotCount < 1) process.exit(1);
-          if (Number(status.walletsStale) > 0) {
+          const walletCount = Number(status.walletCount) || 0;
+          const walletsLive = Number(status.walletsLive) || 0;
+          const walletsStale = Number(status.walletsStale) || 0;
+          if (walletCount > 0 && walletsLive < Math.ceil(walletCount * 0.6)) {
+            console.log(`::error title=Wallet freshness::Only ${walletsLive}/${walletCount} wallets are fresh within ten minutes.`);
+            process.exit(1);
+          }
+          if (walletsStale > Math.max(2, Math.floor(walletCount * 0.1))) {
+            console.log(`::error title=Wallet staleness::${walletsStale}/${walletCount} wallets exceed the three-hour freshness target.`);
+            process.exit(1);
+          }
+          if (walletsStale > 0) {
             console.log(`::warning title=Wallet freshness::${status.walletsStale} wallet(s) still exceed the three-hour freshness target; rolling batches will continue.`);
           }
           console.log("Production status: healthy and recently refreshed.");
