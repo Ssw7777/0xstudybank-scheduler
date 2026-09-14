@@ -2,29 +2,30 @@ name: Production data refresh
 
 on:
   schedule:
-    # Offset from the top of the hour to reduce peak scheduler contention.
-    - cron: "2-59/5 * * * *"
+    # Six-hour watchdog only. Each completed run dispatches the next ten-minute cycle.
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
   group: production-data-refresh
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   rolling-refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 12
     permissions:
       id-token: write
+      actions: write
     env:
       OIDC_AUDIENCE: https://0xstudybank.vercel.app
       FAST_URL: https://0xstudybank.vercel.app/api/cron/refresh?mode=fast
-      WALLET_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=3"
+      WALLET_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=5"
       STATUS_URL: https://0xstudybank.vercel.app/api/status
       BATCH_COUNT: "5"
-      BATCH_INTERVAL_SECONDS: "50"
+      BATCH_INTERVAL_SECONDS: "135"
     steps:
       - name: Refresh exchanges, snapshot, and rolling wallet batches
         shell: bash
@@ -91,8 +92,8 @@ jobs:
           }
 
           fast_failed=0
-          if ! call_refresh "$FAST_URL" "fast" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fast"; then
-            fast_failed=1
+          if ! call_refresh "$FAST_URL" "fast-start" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fast-start"; then
+            fast_failed=$((fast_failed + 1))
           fi
 
           failed_batches=0
@@ -102,6 +103,11 @@ jobs:
             now="$(date +%s)"
             if (( target_time > now )); then
               sleep $((target_time - now))
+            fi
+            if (( batch == 3 )); then
+              if ! call_refresh "$FAST_URL" "fast-mid" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fast-mid"; then
+                fast_failed=$((fast_failed + 1))
+              fi
             fi
             if ! call_refresh "$WALLET_BATCH_URL" "wallet-batch-${batch}" \
               "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-wallet-${batch}"; then
@@ -148,7 +154,7 @@ jobs:
           NODE
 
           if (( fast_failed > 0 )); then
-            echo "::error title=Fast refresh::The exchange/snapshot refresh failed."
+            echo "::error title=Fast refresh::${fast_failed}/2 exchange/snapshot refreshes failed."
             exit 1
           fi
           if (( failed_batches > 2 )); then
@@ -160,3 +166,22 @@ jobs:
           fi
 
           echo "Rolling refresh completed."
+
+      - name: Queue the next rolling cycle
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          curl --fail --silent --show-error --max-time 20 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d '{"ref":"main"}' \
+            -o /dev/null \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/production-refresh.yml/dispatches"
+          echo "Next rolling cycle queued."

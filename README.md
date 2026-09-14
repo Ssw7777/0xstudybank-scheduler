@@ -6,13 +6,14 @@ dashboard credentials, or application source code.
 
 ## Refresh cadence
 
-- Every five minutes, one fast refresh reads the three configured exchanges and
-  records exactly one portfolio snapshot.
-- During the same cycle, five wallet-only micro-batches run about 50 seconds
-  apart. Each batch refreshes at most three least-recently-attempted wallets.
-- Two consecutive cycles therefore form a continuously repeating ten-batch
-  window, enough to rotate through the current 25-wallet set without sending a
-  burst to Rabby's public API.
+- Each rolling cycle refreshes the three configured exchanges and records a
+  portfolio snapshot at the start and midpoint, keeping that data near a
+  five-minute cadence.
+- Five wallet-only micro-batches run about 135 seconds apart. Each batch refreshes
+  at most five least-recently-attempted wallets, rotating through the current
+  25-wallet set in roughly ten minutes without sending a Rabby request burst.
+- A completed run uses its short-lived GitHub token to queue the next run. A
+  six-hour cron acts only as a watchdog because GitHub cron delivery can be delayed.
 - Each request uses a newly issued, short-lived GitHub OIDC token. No deployment
   secret is stored in this repository.
 
