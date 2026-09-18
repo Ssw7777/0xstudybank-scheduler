@@ -15,7 +15,9 @@ concurrency:
 jobs:
   rolling-refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # fast + 5 rolling batches ≈ 10 min; the 20-minute stale sweep adds up to 3 more
+    # batches (60 s apart). 25 min keeps the self-dispatch step safe from job timeouts.
+    timeout-minutes: 25
     permissions:
       id-token: write
       actions: write
@@ -23,9 +25,12 @@ jobs:
       OIDC_AUDIENCE: https://0xstudybank.vercel.app
       FAST_URL: https://0xstudybank.vercel.app/api/cron/refresh?mode=fast
       WALLET_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=5"
+      STALE_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=5&staleMinutes=20"
       STATUS_URL: https://0xstudybank.vercel.app/api/status
       BATCH_COUNT: "5"
       BATCH_INTERVAL_SECONDS: "135"
+      STALE_BATCH_MAX: "3"
+      STALE_BATCH_INTERVAL_SECONDS: "60"
     steps:
       - name: Refresh exchanges, snapshot, and rolling wallet batches
         shell: bash
@@ -83,12 +88,45 @@ jobs:
           const payload = JSON.parse(fs.readFileSync(process.env.BODY_FILE, "utf8"));
           const isWalletBatch = process.env.LABEL.startsWith("wallet-batch-");
           const skipped = payload.skipped === "refresh_in_progress" || payload.reason === "refresh_in_progress";
+          const drained = payload.skipped === "no_stale_wallets";
           const batchWorked = !isWalletBatch || (Number(payload.batchAttempted) > 0 && Number(payload.batchSucceeded) > 0);
-          const accepted = payload.ok === true && !skipped && batchWorked;
+          const accepted = payload.ok === true && (drained || (!skipped && batchWorked));
           if (!accepted) process.exit(1);
+          if (drained) {
+            console.log(`${process.env.LABEL}: no stale wallets — sweep queue drained`);
+            process.exit(0);
+          }
           const state = payload.refreshStatus || "accepted";
           console.log(`${process.env.LABEL}: ${state}`);
           NODE
+          }
+
+          read_over20() {
+            STATUS_FILE="$status_file" node -e '
+              const fs = require("fs");
+              try {
+                const status = JSON.parse(fs.readFileSync(process.env.STATUS_FILE, "utf8"));
+                process.stdout.write(String(Math.max(0, Number(status.walletsOver20min) || 0)));
+              } catch {
+                process.stdout.write("-1");
+              }
+            '
+          }
+
+          fetch_status() {
+            local token code
+            token="$(get_oidc_token)"
+            echo "::add-mask::$token"
+            code="$(curl --silent --show-error --max-time 30 \
+              -H "Authorization: Bearer ${token}" \
+              -o "$status_file" \
+              -w '%{http_code}' \
+              "$STATUS_URL" || true)"
+            if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
+              echo "-1"
+            else
+              read_over20
+            fi
           }
 
           fast_failed=0
@@ -129,6 +167,25 @@ jobs:
             exit 1
           fi
 
+          # 20-minute freshness sweep: the rolling batches above already try the oldest
+          # wallets first; anything still without a success in over 20 minutes gets up to
+          # three dedicated stale-only batches (staleMinutes=20) before this cycle ends.
+          over20="$(read_over20)"
+          if [[ "$over20" -gt 0 ]] 2>/dev/null; then
+            echo "Freshness check: ${over20} wallet(s) without a successful read in over 20 minutes."
+          fi
+          stale_extra=0
+          while [[ "$over20" =~ ^[0-9]+$ ]] && (( over20 > 0 )) && (( stale_extra < STALE_BATCH_MAX )); do
+            stale_extra=$((stale_extra + 1))
+            sleep "$STALE_BATCH_INTERVAL_SECONDS"
+            if ! call_refresh "$STALE_BATCH_URL" "wallet-stale-${stale_extra}" \
+              "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-stale-${stale_extra}"; then
+              echo "::warning title=Stale sweep::Batch ${stale_extra}/${STALE_BATCH_MAX} did not drain the queue; the next cycle continues."
+            fi
+            over20="$(fetch_status)"
+            echo "Stale sweep ${stale_extra}/${STALE_BATCH_MAX}: walletsOver20min=${over20}"
+          done
+
           BODY_FILE="$status_file" node <<'NODE'
           const fs = require("fs");
           const status = JSON.parse(fs.readFileSync(process.env.BODY_FILE, "utf8"));
@@ -139,6 +196,7 @@ jobs:
           const walletCount = Number(status.walletCount) || 0;
           const walletsLive = Number(status.walletsLive) || 0;
           const walletsStale = Number(status.walletsStale) || 0;
+          const walletsOver20min = Number(status.walletsOver20min) || 0;
           if (walletCount > 0 && walletsLive < Math.ceil(walletCount * 0.6)) {
             console.log(`::error title=Wallet freshness::Only ${walletsLive}/${walletCount} wallets are fresh within ten minutes.`);
             process.exit(1);
@@ -147,10 +205,13 @@ jobs:
             console.log(`::error title=Wallet staleness::${walletsStale}/${walletCount} wallets exceed the three-hour freshness target.`);
             process.exit(1);
           }
+          if (walletsOver20min > 0) {
+            console.log(`::warning title=Wallet freshness::${walletsOver20min} wallet(s) still exceed the 20-minute target; the next cycle sweeps again.`);
+          }
           if (walletsStale > 0) {
             console.log(`::warning title=Wallet freshness::${status.walletsStale} wallet(s) still exceed the three-hour freshness target; rolling batches will continue.`);
           }
-          console.log("Production status: healthy and recently refreshed.");
+          console.log(`Production status: healthy and recently refreshed. over20min=${walletsOver20min} stale3h=${walletsStale}`);
           NODE
 
           if (( fast_failed > 0 )); then
