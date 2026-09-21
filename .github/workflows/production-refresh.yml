@@ -15,7 +15,7 @@ concurrency:
 jobs:
   rolling-refresh:
     runs-on: ubuntu-latest
-    # fast + 5 rolling batches ≈ 10 min; the 20-minute stale sweep adds up to 3 more
+    # fast + 9 smaller rolling batches ≈ 9 min; the 20-minute stale sweep adds up to 3 more
     # batches (60 s apart). 25 min keeps the self-dispatch step safe from job timeouts.
     timeout-minutes: 25
     permissions:
@@ -24,11 +24,11 @@ jobs:
     env:
       OIDC_AUDIENCE: https://0xstudybank.vercel.app
       FAST_URL: https://0xstudybank.vercel.app/api/cron/refresh?mode=fast
-      WALLET_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=5"
-      STALE_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=5&staleMinutes=20"
+      WALLET_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=3"
+      STALE_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=3&staleMinutes=20"
       STATUS_URL: https://0xstudybank.vercel.app/api/status
-      BATCH_COUNT: "5"
-      BATCH_INTERVAL_SECONDS: "135"
+      BATCH_COUNT: "9"
+      BATCH_INTERVAL_SECONDS: "60"
       STALE_BATCH_MAX: "3"
       STALE_BATCH_INTERVAL_SECONDS: "60"
     steps:
@@ -144,7 +144,7 @@ jobs:
             if (( target_time > now )); then
               sleep $((target_time - now))
             fi
-            if (( batch == 3 )); then
+            if (( batch == 5 )); then
               if ! call_refresh "$FAST_URL" "fast-mid" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fast-mid"; then
                 fast_failed=$((fast_failed + 1))
               fi
