@@ -15,9 +15,8 @@ concurrency:
 jobs:
   rolling-refresh:
     runs-on: ubuntu-latest
-    # Spread all 25 wallets evenly across about ten minutes. One wallet per request
-    # avoids the short Rabby bursts that previously exhausted its public rate bucket.
-    # The stale sweep adds at most two more minutes; 25 min leaves dispatch headroom.
+    # GitHub reads Rabby directly and securely writes each observation back to Vercel.
+    # The 25 wallets are spread across about nine minutes; 25 min leaves dispatch headroom.
     timeout-minutes: 25
     permissions:
       id-token: write
@@ -25,13 +24,11 @@ jobs:
     env:
       OIDC_AUDIENCE: https://0xstudybank.vercel.app
       FAST_URL: https://0xstudybank.vercel.app/api/cron/refresh?mode=fast
-      WALLET_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=1"
-      STALE_BATCH_URL: "https://0xstudybank.vercel.app/api/cron/refresh?mode=wallet-batch&walletBudget=1&staleMinutes=20"
+      TARGETS_URL: https://0xstudybank.vercel.app/api/cron/wallet-targets
+      OBSERVATION_URL: https://0xstudybank.vercel.app/api/cron/wallet-observation
+      RABBY_TOTAL_URL: https://api.rabby.io/v1/user/total_balance
       STATUS_URL: https://0xstudybank.vercel.app/api/status
-      BATCH_COUNT: "25"
-      BATCH_INTERVAL_SECONDS: "24"
-      STALE_BATCH_MAX: "5"
-      STALE_BATCH_INTERVAL_SECONDS: "24"
+      WALLET_INTERVAL_SECONDS: "22"
     steps:
       - name: Refresh exchanges, snapshot, and rolling wallet batches
         shell: bash
@@ -103,33 +100,100 @@ jobs:
           NODE
           }
 
-          read_over20() {
-            STATUS_FILE="$status_file" node -e '
-              const fs = require("fs");
-              try {
-                const status = JSON.parse(fs.readFileSync(process.env.STATUS_FILE, "utf8"));
-                process.stdout.write(String(Math.max(0, Number(status.walletsOver20min) || 0)));
-              } catch {
-                process.stdout.write("-1");
-              }
-            '
-          }
-
-          fetch_status() {
+          fetch_targets() {
             local token code
             token="$(get_oidc_token)"
             echo "::add-mask::$token"
             code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
               --retry 2 --retry-delay 4 --retry-all-errors \
               -H "Authorization: Bearer ${token}" \
-              -o "$status_file" \
+              -o "$targets_file" \
               -w '%{http_code}' \
-              "$STATUS_URL" || true)"
+              "$TARGETS_URL" || true)"
             if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-              echo "-1"
-            else
-              read_over20
+              echo "::error title=Wallet manifest::Target endpoint returned HTTP ${code:-000}."
+              return 1
             fi
+            TARGETS_FILE="$targets_file" node <<'NODE'
+          const fs = require("fs");
+          const payload = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
+          if (payload.ok !== true || !Array.isArray(payload.wallets) || payload.wallets.length < 1 || payload.wallets.length > 50) {
+            process.exit(1);
+          }
+          for (const wallet of payload.wallets) {
+            if (!wallet || typeof wallet.address !== "string" || !/^0x[a-fA-F0-9]{40}$/.test(wallet.address)) {
+              process.exit(1);
+            }
+          }
+          console.log(`Wallet manifest: ${payload.wallets.length} configured address(es).`);
+          NODE
+          }
+
+          observe_wallet() {
+            local index="$1"
+            local ordinal="$2"
+            local address rabby_file payload_file response_file code token
+            rabby_file="$work_dir/rabby-${ordinal}.json"
+            payload_file="$work_dir/observation-${ordinal}.json"
+            response_file="$work_dir/observation-response-${ordinal}.json"
+            address="$(TARGETS_FILE="$targets_file" INDEX="$index" node -e '
+              const fs = require("fs");
+              const data = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
+              const wallet = data.wallets[Number(process.env.INDEX)];
+              if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet.address)) process.exit(1);
+              process.stdout.write(wallet.address.toLowerCase());
+            ')"
+
+            code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
+              --retry 2 --retry-delay 10 --retry-all-errors --fail-with-body \
+              -H "Accept: application/json" \
+              -H "User-Agent: 0xstudybank-scheduler/1.0" \
+              -o "$rabby_file" \
+              -w '%{http_code}' \
+              "${RABBY_TOTAL_URL}?id=${address}" || true)"
+            if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
+              echo "::warning title=wallet-${ordinal}::Rabby returned HTTP ${code:-000}; the next cycle will retry this address."
+              return 1
+            fi
+
+            ADDRESS="$address" RABBY_FILE="$rabby_file" PAYLOAD_FILE="$payload_file" node <<'NODE'
+          const fs = require("fs");
+          const observation = JSON.parse(fs.readFileSync(process.env.RABBY_FILE, "utf8"));
+          const total = Number(observation && (observation.total_usd_value ?? observation.total_usd));
+          if (!Number.isFinite(total) || total < 0 || !Array.isArray(observation.chain_list)) process.exit(1);
+          fs.writeFileSync(process.env.PAYLOAD_FILE, JSON.stringify({
+            address: process.env.ADDRESS,
+            observation,
+          }));
+          NODE
+
+            for ingest_attempt in 1 2 3; do
+              token="$(get_oidc_token)"
+              echo "::add-mask::$token"
+              code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+                --retry 1 --retry-delay 3 --retry-all-errors \
+                -X POST \
+                -H "Authorization: Bearer ${token}" \
+                -H "X-Idempotency-Key: ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observation-${ordinal}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$payload_file" \
+                -o "$response_file" \
+                -w '%{http_code}' \
+                "$OBSERVATION_URL" || true)"
+              if [[ "$code" =~ ^2[0-9][0-9]$ ]] && \
+                RESPONSE_FILE="$response_file" node -e '
+                  const fs = require("fs");
+                  const body = JSON.parse(fs.readFileSync(process.env.RESPONSE_FILE, "utf8"));
+                  if (body.ok !== true || body.ran !== "wallet-observation") process.exit(1);
+                '; then
+                echo "wallet-${ordinal}: observation accepted"
+                return 0
+              fi
+              sleep 4
+            done
+
+            echo "::warning title=wallet-${ordinal}::Vercel rejected the observation; the next cycle will retry this address."
+            return 1
           }
 
           fast_failed=0
@@ -137,24 +201,32 @@ jobs:
             fast_failed=$((fast_failed + 1))
           fi
 
-          failed_batches=0
+          targets_file="$work_dir/wallet-targets.json"
+          fetch_targets
+          wallet_count="$(TARGETS_FILE="$targets_file" node -e '
+            const fs = require("fs");
+            const data = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
+            process.stdout.write(String(data.wallets.length));
+          ')"
+
+          failed_wallets=0
           batch_start="$(date +%s)"
-          for batch in $(seq 1 "$BATCH_COUNT"); do
-            target_time=$((batch_start + (batch - 1) * BATCH_INTERVAL_SECONDS))
+          for index in $(seq 0 $((wallet_count - 1))); do
+            ordinal=$((index + 1))
+            target_time=$((batch_start + index * WALLET_INTERVAL_SECONDS))
             now="$(date +%s)"
             if (( target_time > now )); then
               sleep $((target_time - now))
             fi
-            # The second fast refresh lands at about 4m48s, preserving the five-minute
+            # The second fast refresh lands at about 4m46s, preserving the five-minute
             # exchange/snapshot cadence while wallet reads continue independently.
-            if (( batch == 13 )); then
+            if (( ordinal == 14 )); then
               if ! call_refresh "$FAST_URL" "fast-mid" "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fast-mid"; then
                 fast_failed=$((fast_failed + 1))
               fi
             fi
-            if ! call_refresh "$WALLET_BATCH_URL" "wallet-batch-${batch}" \
-              "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-wallet-${batch}"; then
-              failed_batches=$((failed_batches + 1))
+            if ! observe_wallet "$index" "$ordinal"; then
+              failed_wallets=$((failed_wallets + 1))
             fi
           done
 
@@ -172,25 +244,6 @@ jobs:
             echo "::error title=Production status::Status endpoint returned HTTP ${status_code:-000}."
             exit 1
           fi
-
-          # 20-minute freshness sweep: the rolling batches above already try the oldest
-          # wallets first; anything still without a success in over 20 minutes gets up to
-          # three dedicated stale-only batches (staleMinutes=20) before this cycle ends.
-          over20="$(read_over20)"
-          if [[ "$over20" -gt 0 ]] 2>/dev/null; then
-            echo "Freshness check: ${over20} wallet(s) without a successful read in over 20 minutes."
-          fi
-          stale_extra=0
-          while [[ "$over20" =~ ^[0-9]+$ ]] && (( over20 > 0 )) && (( stale_extra < STALE_BATCH_MAX )); do
-            stale_extra=$((stale_extra + 1))
-            sleep "$STALE_BATCH_INTERVAL_SECONDS"
-            if ! call_refresh "$STALE_BATCH_URL" "wallet-stale-${stale_extra}" \
-              "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-stale-${stale_extra}"; then
-              echo "::warning title=Stale sweep::Batch ${stale_extra}/${STALE_BATCH_MAX} did not drain the queue; the next cycle continues."
-            fi
-            over20="$(fetch_status)"
-            echo "Stale sweep ${stale_extra}/${STALE_BATCH_MAX}: walletsOver20min=${over20}"
-          done
 
           BODY_FILE="$status_file" node <<'NODE'
           const fs = require("fs");
@@ -224,12 +277,12 @@ jobs:
             echo "::error title=Fast refresh::${fast_failed}/2 exchange/snapshot refreshes failed."
             exit 1
           fi
-          if (( failed_batches > 5 )); then
-            echo "::error title=Wallet batches::${failed_batches}/${BATCH_COUNT} wallet batches failed."
+          if (( failed_wallets > 5 )); then
+            echo "::error title=Wallet observations::${failed_wallets}/${wallet_count} wallet observations failed."
             exit 1
           fi
-          if (( failed_batches > 0 )); then
-            echo "::warning title=Wallet batches::${failed_batches}/${BATCH_COUNT} wallet batches failed; later cycles will fill the gap."
+          if (( failed_wallets > 0 )); then
+            echo "::warning title=Wallet observations::${failed_wallets}/${wallet_count} wallet observations failed; the next cycle will retry."
           fi
 
           echo "Rolling refresh completed."
