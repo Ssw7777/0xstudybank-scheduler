@@ -69,7 +69,8 @@ jobs:
             token="$(get_oidc_token)"
             echo "::add-mask::$token"
 
-            http_code="$(curl --silent --show-error --max-time 55 \
+            http_code="$(curl --silent --show-error --connect-timeout 10 --max-time 55 \
+              --retry 2 --retry-delay 4 --retry-all-errors \
               -X POST \
               -H "Authorization: Bearer ${token}" \
               -H "X-Idempotency-Key: ${request_key}" \
@@ -117,7 +118,8 @@ jobs:
             local token code
             token="$(get_oidc_token)"
             echo "::add-mask::$token"
-            code="$(curl --silent --show-error --max-time 30 \
+            code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+              --retry 2 --retry-delay 4 --retry-all-errors \
               -H "Authorization: Bearer ${token}" \
               -o "$status_file" \
               -w '%{http_code}' \
@@ -156,7 +158,8 @@ jobs:
           status_token="$(get_oidc_token)"
           echo "::add-mask::$status_token"
           status_file="$work_dir/status.json"
-          status_code="$(curl --silent --show-error --max-time 30 \
+          status_code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --retry 2 --retry-delay 4 --retry-all-errors \
             -H "Authorization: Bearer ${status_token}" \
             -o "$status_file" \
             -w '%{http_code}' \
@@ -236,7 +239,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           set +x
-          curl --fail --silent --show-error --max-time 20 \
+          curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
+            --retry 2 --retry-delay 4 --retry-all-errors \
             -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
