@@ -2,8 +2,11 @@ name: Production data refresh
 
 on:
   schedule:
-    # Six-hour watchdog only. The final job dispatches the next rolling cycle.
-    - cron: "17 */6 * * *"
+    # Wallet/Rabby round every ten minutes.
+    - cron: "3,13,23,33,43,53 * * * *"
+    # Interleaved CEX + portfolio snapshot round. Together both schedules keep
+    # fast data on a five-minute cadence without doubling Rabby traffic.
+    - cron: "8,18,28,38,48,58 * * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -19,229 +22,31 @@ env:
   OBSERVATION_URL: https://0xstudybank.vercel.app/api/cron/wallet-observation
   STATUS_URL: https://0xstudybank.vercel.app/api/status
   RABBY_TOTAL_URL: https://api.rabby.io/v1/user/total_balance
+  RABBY_PROTOCOL_URL: https://api.rabby.io/v1/user/complex_protocol_list
+  DEBANK_APP_URL: https://api.debank.com/portfolio/app_list
   SHARD_COUNT: "5"
-  WALLET_INTERVAL_SECONDS: "22"
+  RABBY_CALL_INTERVAL_SECONDS: "4"
+  BATCH_STAGGER_SECONDS: "5"
 
 jobs:
-  refresh-wallets:
-    name: wallet-shard-${{ matrix.shard }}
+  fast-refresh:
+    name: fast-refresh
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4]
+    timeout-minutes: 3
     permissions:
       id-token: write
-    env:
-      SHARD: ${{ matrix.shard }}
     steps:
-      - name: Collect five-wallet shard
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          set +x
-          umask 077
-
-          work_dir="$(mktemp -d)"
-          trap 'rm -rf "$work_dir"' EXIT
-          targets_file="$work_dir/wallet-targets.json"
-
-          get_oidc_token() {
-            local encoded_audience
-            encoded_audience="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$OIDC_AUDIENCE")"
-            curl --fail --silent --show-error --max-time 15 \
-              -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded_audience}" \
-              | node -e '
-                  let input = "";
-                  process.stdin.setEncoding("utf8");
-                  process.stdin.on("data", (chunk) => { input += chunk; });
-                  process.stdin.on("end", () => {
-                    const value = JSON.parse(input).value;
-                    if (typeof value !== "string" || !value) process.exit(1);
-                    process.stdout.write(value);
-                  });
-                '
-          }
-
-          call_fast() {
-            local label="$1"
-            local token body_file code
-            body_file="$work_dir/${label}.json"
-            token="$(get_oidc_token)"
-            echo "::add-mask::$token"
-            code="$(curl --silent --show-error --connect-timeout 10 --max-time 55 \
-              --retry 2 --retry-delay 4 --retry-all-errors \
-              -X POST \
-              -H "Authorization: Bearer ${token}" \
-              -H "X-Idempotency-Key: ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${label}" \
-              -H "Content-Type: application/json" \
-              -o "$body_file" \
-              -w '%{http_code}' \
-              "$FAST_URL" || true)"
-            if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-              echo "::warning title=${label}::Fast refresh returned HTTP ${code:-000}."
-              return 1
-            fi
-            LABEL="$label" BODY_FILE="$body_file" node <<'NODE'
-          const fs = require("fs");
-          const body = JSON.parse(fs.readFileSync(process.env.BODY_FILE, "utf8"));
-          if (body.ok !== true || body.reason === "refresh_in_progress") process.exit(1);
-          console.log(`${process.env.LABEL}: snapshot accepted`);
-          NODE
-          }
-
-          fetch_targets() {
-            local token code
-            token="$(get_oidc_token)"
-            echo "::add-mask::$token"
-            code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
-              --retry 2 --retry-delay 4 --retry-all-errors \
-              -H "Authorization: Bearer ${token}" \
-              -o "$targets_file" \
-              -w '%{http_code}' \
-              "$TARGETS_URL" || true)"
-            if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-              echo "::error title=Wallet manifest::Target endpoint returned HTTP ${code:-000}."
-              return 1
-            fi
-            TARGETS_FILE="$targets_file" node <<'NODE'
-          const fs = require("fs");
-          const body = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
-          if (body.ok !== true || !Array.isArray(body.wallets) || body.wallets.length < 1 || body.wallets.length > 50) process.exit(1);
-          for (const wallet of body.wallets) {
-            if (!wallet || typeof wallet.address !== "string" || !/^0x[a-fA-F0-9]{40}$/.test(wallet.address)) process.exit(1);
-          }
-          console.log(`Wallet manifest: ${body.wallets.length} configured address(es).`);
-          NODE
-          }
-
-          observe_wallet() {
-            local index="$1"
-            local ordinal="$2"
-            local address rabby_file payload_file response_file code token
-            rabby_file="$work_dir/rabby-${ordinal}.json"
-            payload_file="$work_dir/observation-${ordinal}.json"
-            response_file="$work_dir/observation-response-${ordinal}.json"
-            address="$(TARGETS_FILE="$targets_file" INDEX="$index" node -e '
-              const fs = require("fs");
-              const data = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
-              const wallet = data.wallets[Number(process.env.INDEX)];
-              if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet.address)) process.exit(1);
-              process.stdout.write(wallet.address.toLowerCase());
-            ')"
-
-            code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
-              --retry 2 --retry-delay 10 --retry-all-errors --fail-with-body \
-              -H "Accept: application/json" \
-              -H "User-Agent: 0xstudybank-scheduler/1.0" \
-              -o "$rabby_file" \
-              -w '%{http_code}' \
-              "${RABBY_TOTAL_URL}?id=${address}" || true)"
-            if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-              echo "::warning title=wallet-${ordinal}::Rabby returned HTTP ${code:-000}; the next cycle will retry."
-              return 1
-            fi
-
-            ADDRESS="$address" RABBY_FILE="$rabby_file" PAYLOAD_FILE="$payload_file" node <<'NODE'
-          const fs = require("fs");
-          const observation = JSON.parse(fs.readFileSync(process.env.RABBY_FILE, "utf8"));
-          const total = Number(observation && (observation.total_usd_value ?? observation.total_usd));
-          if (!Number.isFinite(total) || total < 0 || !Array.isArray(observation.chain_list)) process.exit(1);
-          fs.writeFileSync(process.env.PAYLOAD_FILE, JSON.stringify({ address: process.env.ADDRESS, observation }));
-          NODE
-
-            for ingest_attempt in 1 2 3; do
-              token="$(get_oidc_token)"
-              echo "::add-mask::$token"
-              code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
-                --retry 1 --retry-delay 3 --retry-all-errors \
-                -X POST \
-                -H "Authorization: Bearer ${token}" \
-                -H "X-Idempotency-Key: ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observation-${ordinal}" \
-                -H "Content-Type: application/json" \
-                --data-binary "@$payload_file" \
-                -o "$response_file" \
-                -w '%{http_code}' \
-                "$OBSERVATION_URL" || true)"
-              if [[ "$code" =~ ^2[0-9][0-9]$ ]] && \
-                RESPONSE_FILE="$response_file" node -e '
-                  const fs = require("fs");
-                  const body = JSON.parse(fs.readFileSync(process.env.RESPONSE_FILE, "utf8"));
-                  if (body.ok !== true || body.ran !== "wallet-observation") process.exit(1);
-                '; then
-                echo "wallet-${ordinal}: observation accepted"
-                return 0
-              fi
-              sleep 4
-            done
-
-            echo "::warning title=wallet-${ordinal}::Vercel rejected the observation; the next cycle will retry."
-            return 1
-          }
-
-          fetch_targets
-          wallet_count="$(TARGETS_FILE="$targets_file" node -e '
-            const fs = require("fs");
-            const data = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
-            process.stdout.write(String(data.wallets.length));
-          ')"
-
-          failed_wallets=0
-          fast_failed=0
-          position=0
-          batch_start="$(date +%s)"
-          for index in $(seq "$SHARD" "$SHARD_COUNT" $((wallet_count - 1))); do
-            ordinal=$((index + 1))
-            target_time=$((batch_start + position * WALLET_INTERVAL_SECONDS * SHARD_COUNT + SHARD * WALLET_INTERVAL_SECONDS))
-            now="$(date +%s)"
-            if (( target_time > now )); then sleep $((target_time - now)); fi
-
-            if (( SHARD == 0 && position == 0 )); then
-              if ! call_fast "fast-start"; then fast_failed=$((fast_failed + 1)); fi
-            fi
-            if (( SHARD == 2 && position == 2 )); then
-              if ! call_fast "fast-mid"; then fast_failed=$((fast_failed + 1)); fi
-            fi
-            if ! observe_wallet "$index" "$ordinal"; then failed_wallets=$((failed_wallets + 1)); fi
-            position=$((position + 1))
-          done
-
-          if (( fast_failed > 0 )); then
-            echo "::error title=Fast refresh::${fast_failed} scheduled snapshot refresh(es) failed."
-            exit 1
-          fi
-          if (( failed_wallets > 1 )); then
-            echo "::error title=Wallet shard::${failed_wallets} wallet observations failed in shard ${SHARD}."
-            exit 1
-          fi
-          if (( failed_wallets > 0 )); then
-            echo "::warning title=Wallet shard::One wallet observation failed in shard ${SHARD}; the next cycle will retry."
-          fi
-          echo "Shard ${SHARD} completed."
-
-  finalize:
-    name: verify-and-continue
-    needs: refresh-wallets
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      id-token: write
-      actions: write
-    steps:
-      - name: Verify production freshness
+      - name: Record exchange data and portfolio snapshot
         shell: bash
         run: |
           set -Eeuo pipefail
           set +x
           work_dir="$(mktemp -d)"
           trap 'rm -rf "$work_dir"' EXIT
-          status_file="$work_dir/status.json"
-
+          response_file="$work_dir/fast-response.json"
           encoded_audience="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$OIDC_AUDIENCE")"
-          token="$(curl --fail --silent --show-error --max-time 15 \
+          token="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
+            --retry 2 --retry-delay 2 --retry-all-errors \
             -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded_audience}" \
             | node -e '
@@ -250,53 +55,156 @@ jobs:
                 process.stdin.on("data", (chunk) => { input += chunk; });
                 process.stdin.on("end", () => process.stdout.write(JSON.parse(input).value || ""));
               ')"
+          test -n "$token"
           echo "::add-mask::$token"
-          code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+          code="$(curl --silent --show-error --connect-timeout 10 --max-time 60 \
             --retry 2 --retry-delay 4 --retry-all-errors \
+            -X POST \
             -H "Authorization: Bearer ${token}" \
-            -o "$status_file" \
+            -H "X-Idempotency-Key: ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fast" \
+            -H "Content-Type: application/json" \
+            -o "$response_file" \
             -w '%{http_code}' \
-            "$STATUS_URL" || true)"
+            "$FAST_URL" || true)"
           if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-            echo "::error title=Production status::Status endpoint returned HTTP ${code:-000}."
+            echo "::error title=Fast refresh::Fast endpoint returned HTTP ${code:-000}."
+            exit 1
+          fi
+          if ! RESPONSE_FILE="$response_file" node -e '
+            const fs = require("fs");
+            const body = JSON.parse(fs.readFileSync(process.env.RESPONSE_FILE, "utf8"));
+            if (body.ok !== true || body.reason === "refresh_in_progress") process.exit(1);
+            console.log("Fast data refresh and snapshot accepted.");
+          '; then
+            echo "::error title=Fast refresh::Fast endpoint did not confirm a completed refresh."
             exit 1
           fi
 
-          STATUS_FILE="$status_file" node <<'NODE'
-          const fs = require("fs");
-          const status = JSON.parse(fs.readFileSync(process.env.STATUS_FILE, "utf8"));
-          if (status.ok !== true || !Number.isFinite(status.refreshAgeSeconds) || status.refreshAgeSeconds > 900) process.exit(1);
-          if (!Number.isInteger(status.snapshotCount) || status.snapshotCount < 1) process.exit(1);
-          const walletCount = Number(status.walletCount) || 0;
-          const walletsLive = Number(status.walletsLive) || 0;
-          const walletsOver20min = Number(status.walletsOver20min) || 0;
-          if (walletCount < 1 || walletsLive !== walletCount) {
-            console.log(`::error title=Wallet freshness::Only ${walletsLive}/${walletCount} wallets are fresh within ten minutes.`);
-            process.exit(1);
-          }
-          if (walletsOver20min > 0) {
-            console.log(`::error title=Wallet freshness::${walletsOver20min} wallet(s) exceed the 20-minute target.`);
-            process.exit(1);
-          }
-          console.log(`Production status: ${walletsLive}/${walletCount} wallets fresh within ten minutes.`);
-          NODE
-
-      - name: Queue the next rolling cycle
-        if: always()
+  refresh-wallets:
+    name: primary-shard-${{ matrix.shard }}
+    needs: fast-refresh
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SHARD: ${{ matrix.shard }}
+      MODE: primary
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect and submit primary wallet shard
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/refresh-wallet-shard.sh
+
+  retry-stale-wallets:
+    name: retry-shard-${{ matrix.shard }}
+    needs: refresh-wallets
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SHARD: ${{ matrix.shard }}
+      MODE: retry
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retry stale wallets on fresh runners
+        shell: bash
+        run: bash .github/scripts/refresh-wallet-shard.sh
+
+  finalize:
+    name: verify-production-freshness
+    needs: [fast-refresh, refresh-wallets, retry-stale-wallets]
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      id-token: write
+    steps:
+      - name: Require all 25 wallets to be fresh
+        shell: bash
         run: |
           set -Eeuo pipefail
           set +x
-          curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
-            --retry 2 --retry-delay 4 --retry-all-errors \
-            -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/json" \
-            -d '{"ref":"main"}' \
-            -o /dev/null \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/production-refresh.yml/dispatches"
-          echo "Next rolling cycle queued."
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+          status_file="$work_dir/status.json"
+          targets_file="$work_dir/targets.json"
+
+          encoded_audience="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$OIDC_AUDIENCE")"
+          token="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
+            --retry 2 --retry-delay 2 --retry-all-errors \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded_audience}" \
+            | node -e '
+                let input = "";
+                process.stdin.setEncoding("utf8");
+                process.stdin.on("data", (chunk) => { input += chunk; });
+                process.stdin.on("end", () => process.stdout.write(JSON.parse(input).value || ""));
+              ')"
+          test -n "$token"
+          echo "::add-mask::$token"
+
+          for endpoint in status targets; do
+            if [[ "$endpoint" == "status" ]]; then
+              url="$STATUS_URL"
+              output="$status_file"
+            else
+              url="$TARGETS_URL"
+              output="$targets_file"
+            fi
+            code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+              --retry 2 --retry-delay 4 --retry-all-errors \
+              -H "Authorization: Bearer ${token}" \
+              -o "$output" \
+              -w '%{http_code}' \
+              "$url" || true)"
+            if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
+              echo "::error title=Production verification::${endpoint} endpoint returned HTTP ${code:-000}."
+              exit 1
+            fi
+          done
+
+          STATUS_FILE="$status_file" TARGETS_FILE="$targets_file" node <<'NODE'
+          const fs = require("fs");
+          const status = JSON.parse(fs.readFileSync(process.env.STATUS_FILE, "utf8"));
+          const targets = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
+          const failures = [];
+          if (status.ok !== true) failures.push("status endpoint did not report ok");
+          if (!Number.isFinite(status.refreshAgeSeconds) || status.refreshAgeSeconds > 600) {
+            failures.push(`latest snapshot is ${status.refreshAgeSeconds ?? "unknown"} seconds old`);
+          }
+          if (!Number.isInteger(status.snapshotCount) || status.snapshotCount < 1) failures.push("no portfolio snapshot exists");
+          if (Number(status.walletCount) !== 25) failures.push(`configured wallet count is ${status.walletCount}, expected 25`);
+          if (Number(status.walletsLive) !== 25) failures.push(`only ${status.walletsLive}/25 wallets are live`);
+          if (Number(status.walletsOver20min) !== 0) failures.push(`${status.walletsOver20min} wallets exceed 20 minutes`);
+          if (Number(status.appsFresh) !== 25 || Number(status.appsStale) !== 0) {
+            failures.push(`only ${status.appsFresh}/25 App audits are fresh`);
+          }
+          if (Number(status.protocolsFresh) !== 25 || Number(status.protocolsStale) !== 0) {
+            failures.push(`only ${status.protocolsFresh}/25 protocol audits are fresh`);
+          }
+          if (targets.ok !== true || !Array.isArray(targets.wallets) || targets.wallets.length !== 25) {
+            failures.push("wallet manifest is not exactly 25 addresses");
+          } else {
+            const retryCount = targets.wallets.filter((wallet) => wallet.needsRetry === true).length;
+            if (retryCount !== 0) failures.push(`${retryCount} wallets remain older than the retry threshold`);
+          }
+          if (failures.length) {
+            for (const failure of failures) console.log(`::error title=Production freshness::${failure}.`);
+            process.exit(1);
+          }
+          console.log("Production verified: snapshot current, 25/25 wallets, App audits, and protocol audits fresh.");
+          NODE
