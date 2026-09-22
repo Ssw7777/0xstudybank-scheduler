@@ -23,7 +23,6 @@ env:
   STATUS_URL: https://0xstudybank.vercel.app/api/status
   RABBY_TOTAL_URL: https://api.rabby.io/v1/user/total_balance
   RABBY_PROTOCOL_URL: https://api.rabby.io/v1/user/complex_protocol_list
-  DEBANK_APP_URL: https://api.debank.com/portfolio/app_list
   SHARD_COUNT: "5"
   RABBY_CALL_INTERVAL_SECONDS: "4"
   BATCH_STAGGER_SECONDS: "5"

@@ -87,7 +87,6 @@ target_field() {
     const wallet = data.wallets[Number(process.env.INDEX)];
     if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet.address)) process.exit(1);
     if (process.env.FIELD === "address") process.stdout.write(wallet.address.toLowerCase());
-    else if (process.env.FIELD === "needsAppRefresh") process.stdout.write(wallet.needsAppRefresh === true ? "true" : "false");
     else if (process.env.FIELD === "needsProtocolRefresh") process.stdout.write(wallet.needsProtocolRefresh === true ? "true" : "false");
     else process.stdout.write(wallet.needsRetry === true ? "true" : "false");
   '
@@ -96,10 +95,9 @@ target_field() {
 collect_observation() {
   local index="$1"
   local ordinal="$2"
-  local address rabby_file app_file protocol_file code app_code protocol_code observed_at
+  local address rabby_file protocol_file code protocol_code observed_at
   address="$(target_field "$index" address)"
   rabby_file="$work_dir/rabby-${ordinal}.json"
-  app_file="$work_dir/app-${ordinal}.json"
   protocol_file="$work_dir/protocol-${ordinal}.json"
 
   code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
@@ -115,22 +113,6 @@ collect_observation() {
   fi
 
   observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if [[ "$mode" == "primary" ]] && [[ "$(target_field "$index" needsAppRefresh)" == "true" ]]; then
-    app_code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
-      --retry 1 --retry-delay 4 --retry-all-errors --fail-with-body \
-      -H "Accept: application/json" \
-      -H "Origin: https://debank.com" \
-      -H "Referer: https://debank.com/" \
-      -H "User-Agent: Mozilla/5.0 0xstudybank-scheduler/2.0" \
-      -o "$app_file" \
-      -w '%{http_code}' \
-      "${DEBANK_APP_URL}?user_id=${address}" || true)"
-    if [[ ! "$app_code" =~ ^2[0-9][0-9]$ ]]; then
-      rm -f "$app_file"
-      echo "::warning title=wallet-${ordinal}-apps::DeBank App endpoint returned HTTP ${app_code:-000}; cached App data is retained."
-    fi
-  fi
-
   if [[ "$mode" == "primary" ]] && [[ "$(target_field "$index" needsProtocolRefresh)" == "true" ]]; then
     sleep "$RABBY_CALL_INTERVAL_SECONDS"
     protocol_code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
@@ -146,7 +128,7 @@ collect_observation() {
     fi
   fi
 
-  ADDRESS="$address" OBSERVED_AT="$observed_at" RABBY_FILE="$rabby_file" APP_FILE="$app_file" PROTOCOL_FILE="$protocol_file" OBSERVATIONS_FILE="$observations_file" node <<'NODE'
+  ADDRESS="$address" OBSERVED_AT="$observed_at" RABBY_FILE="$rabby_file" PROTOCOL_FILE="$protocol_file" OBSERVATIONS_FILE="$observations_file" node <<'NODE'
 const fs = require("fs");
 const observation = JSON.parse(fs.readFileSync(process.env.RABBY_FILE, "utf8"));
 const total = Number(observation && (observation.total_usd_value ?? observation.total_usd));
@@ -156,18 +138,6 @@ const entry = {
   observedAt: process.env.OBSERVED_AT,
   observation,
 };
-if (process.env.APP_FILE && fs.existsSync(process.env.APP_FILE)) {
-  try {
-    const appObservation = JSON.parse(fs.readFileSync(process.env.APP_FILE, "utf8"));
-    const body = appObservation && typeof appObservation === "object" && appObservation.data && typeof appObservation.data === "object"
-      ? appObservation.data
-      : appObservation;
-    if (!body || !Array.isArray(body.apps)) throw new Error("invalid app payload");
-    entry.appObservation = appObservation;
-  } catch {
-    console.log(`::warning title=wallet-apps::Invalid App payload for wallet ${process.env.ADDRESS.slice(0, 6)}…; cached data is retained.`);
-  }
-}
 if (process.env.PROTOCOL_FILE && fs.existsSync(process.env.PROTOCOL_FILE)) {
   try {
     const protocolObservation = JSON.parse(fs.readFileSync(process.env.PROTOCOL_FILE, "utf8"));
