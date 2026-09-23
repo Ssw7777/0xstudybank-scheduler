@@ -113,7 +113,7 @@ collect_observation() {
   fi
 
   observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if [[ "$mode" == "primary" ]] && [[ "$(target_field "$index" needsProtocolRefresh)" == "true" ]]; then
+  if [[ "$(target_field "$index" needsProtocolRefresh)" == "true" ]]; then
     sleep "$RABBY_CALL_INTERVAL_SECONDS"
     protocol_code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
       --retry 1 --retry-delay 4 --retry-all-errors --fail-with-body \
