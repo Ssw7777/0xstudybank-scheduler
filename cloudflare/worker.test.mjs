@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { selectShard, jsonRequest, runCycle } from './worker.mjs';
+import { selectShard, jsonRequest, runCycle, dispatchWalletWorkflow } from './worker.mjs';
 
 test('ten shards cover all wallets exactly once, including 25 and 50 addresses', () => {
   for (const count of [1, 25, 50]) {
@@ -88,4 +88,47 @@ test('paused wallet polling does not call the public provider but still takes sc
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test('cloud trigger dispatches stale wallets once using only the existing workflow', async () => {
+  const urls = [];
+  const result = await dispatchWalletWorkflow({ GITHUB_DISPATCH_ENABLED:'true', GITHUB_TOKEN:'test-github',CRON_SECRET:'test-cron' }, Date.now(), async (url, options) => {
+    urls.push(url);
+    if(url.endsWith('/api/status')) {
+      assert.equal(options.headers.Authorization,'Bearer test-cron');
+      return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000});
+    }
+    assert.equal(options.headers.Authorization,'Bearer test-github');
+    if(url.includes('/runs?')) return Response.json({workflow_runs:[]});
+    assert.equal(url,'https://api.github.com/repos/Ssw7777/0xstudybank-scheduler/actions/workflows/production-refresh.yml/dispatches');
+    assert.deepEqual(JSON.parse(options.body),{ref:'main',inputs:{wallet_only:'true'}});
+    return new Response(null,{status:204});
+  });
+  assert.equal(result,'dispatched');
+  assert.equal(urls.length,3);
+});
+
+test('cloud trigger does not duplicate queued/running jobs or fresh data', async () => {
+  const env={GITHUB_DISPATCH_ENABLED:'true',GITHUB_TOKEN:'test',CRON_SECRET:'test'};
+  for(const state of ['queued','in_progress','waiting']) {
+    let calls=0;
+    const result=await dispatchWalletWorkflow(env,Date.now(),async url=>{
+      calls++;
+      if(url.endsWith('/api/status')) return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000});
+      assert.ok(url.includes('/runs?'));
+      return Response.json({workflow_runs:[{status:state}]});
+    });
+    assert.equal(result,'already_running');
+    assert.equal(calls,2);
+  }
+  assert.equal(await dispatchWalletWorkflow(env,Date.now(),async()=>Response.json({oldestWalletAgeSeconds:100,oldestProtocolAgeSeconds:200})),'data_current');
+});
+
+test('GitHub rejection is reported without leaking credentials or retrying', async () => {
+  let calls=0;
+  await assert.rejects(dispatchWalletWorkflow({GITHUB_DISPATCH_ENABLED:'true',GITHUB_TOKEN:'test',CRON_SECRET:'test'},Date.now(),async url=>{
+    calls++;
+    return url.endsWith('/api/status') ? Response.json({oldestWalletAgeSeconds:1000}) : new Response('',{status:429});
+  }),/github_runs_http_429/);
+  assert.equal(calls,2);
 });

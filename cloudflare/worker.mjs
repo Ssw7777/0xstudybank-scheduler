@@ -1,9 +1,37 @@
 const SITE = 'https://0xstudybank.vercel.app';
 const RABBY = 'https://api.rabby.io/v1/user';
+const WORKFLOW = 'https://api.github.com/repos/Ssw7777/0xstudybank-scheduler/actions/workflows/production-refresh.yml';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export function selectShard(wallets, minute) {
   return wallets.filter((_, index) => index % 10 === minute % 10);
+}
+
+export async function dispatchWalletWorkflow(env, now = Date.now(), request = fetch) {
+  if (env.GITHUB_DISPATCH_ENABLED !== 'true') return 'disabled';
+  if (!env.GITHUB_TOKEN) throw new Error('github_scheduler_secret_missing');
+  const statusResponse = await request(`${SITE}/api/status`, {
+    headers: { Authorization: `Bearer ${env.CRON_SECRET}` }, redirect: 'manual', signal: AbortSignal.timeout(20000),
+  });
+  if (!statusResponse.ok) throw new Error(`scheduler_status_http_${statusResponse.status}`);
+  const status = await statusResponse.json();
+  if (status.oldestWalletAgeSeconds !== null && status.oldestWalletAgeSeconds < 300 &&
+      status.oldestProtocolAgeSeconds !== null && status.oldestProtocolAgeSeconds < 480) return 'data_current';
+  const headers = { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'studybank-cloud-scheduler', 'X-GitHub-Api-Version': '2022-11-28' };
+  const response = await request(`${WORKFLOW}/runs?per_page=10`, { headers, redirect: 'manual', signal: AbortSignal.timeout(20000) });
+  if (!response.ok) throw new Error(`github_runs_http_${response.status}`);
+  const body = await response.json();
+  if (!Array.isArray(body.workflow_runs)) throw new Error('invalid_workflow_runs');
+  // Keep one existing runner workflow, never rotate runners to evade a rate limit.
+  if (body.workflow_runs.some(run => ['queued','in_progress','waiting','pending','requested'].includes(run.status))) return 'already_running';
+  if (body.workflow_runs.some(run => now - Date.parse(run.created_at) < 5 * 60000)) return 'recently_started';
+  const dispatched = await request(`${WORKFLOW}/dispatches`, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ref: 'main', inputs: { wallet_only: 'true' } }),
+    redirect: 'manual', signal: AbortSignal.timeout(20000),
+  });
+  if (![200, 204].includes(dispatched.status)) throw new Error(`github_dispatch_http_${dispatched.status}`);
+  return 'dispatched';
 }
 
 export async function jsonRequest(url, options = {}, timeout = 20000, runtime = {}) {
@@ -106,13 +134,18 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
     if (!accepted.ok || accepted.ran !== 'wallet-observations') throw new Error('observation_not_accepted');
   }
   let snapshot = 'not_due';
+  let walletDispatch = 'not_due';
+  if (manualSlot === undefined) {
+    try { walletDispatch = await dispatchWalletWorkflow(env, scheduledTime); }
+    catch (error) { walletDispatch = 'failed'; failures.push({ stage: 'dispatch', reason: String(error?.message ?? 'dispatch_failed').slice(0, 160) }); }
+  }
   if (minute % 5 === 0 && manualSlot === undefined) {
     const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=fast`, {
       method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-fast-${minute}-${execution}` },
     }, 55000);
     snapshot = result.ok && result.reason !== 'refresh_in_progress' ? 'accepted' : 'not_completed';
   }
-  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed', walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
+  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed' && walletDispatch !== 'failed', walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', walletDispatch, slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
   console.log(JSON.stringify(result));
   return result;
 }

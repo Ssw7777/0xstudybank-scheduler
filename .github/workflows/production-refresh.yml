@@ -8,6 +8,11 @@ on:
     # fast data on a five-minute cadence without doubling Rabby traffic.
     - cron: "8,18,28,38,48,58 * * * *"
   workflow_dispatch:
+    inputs:
+      wallet_only:
+        description: Skip exchange refresh when the cloud scheduler already refreshed it
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -30,6 +35,7 @@ env:
 jobs:
   fast-refresh:
     name: fast-refresh
+    if: ${{ inputs.wallet_only != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -84,9 +90,12 @@ jobs:
     needs: fast-refresh
     if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
     strategy:
-      fail-fast: false
+      # A provider 429 fails the shard and cancels queued shards rather than
+      # continuing from a different runner/IP.
+      fail-fast: true
+      max-parallel: 1
       matrix:
         shard: [0, 1, 2, 3, 4]
     permissions:
@@ -104,11 +113,12 @@ jobs:
   retry-stale-wallets:
     name: retry-shard-${{ matrix.shard }}
     needs: refresh-wallets
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
+    if: ${{ always() && needs.refresh-wallets.result == 'success' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard: [0, 1, 2, 3, 4]
     permissions:
@@ -119,7 +129,7 @@ jobs:
       MODE: retry
     steps:
       - uses: actions/checkout@v4
-      - name: Retry stale wallets on fresh runners
+      - name: Retry transient failures only when no provider rate limit occurred
         shell: bash
         run: bash .github/scripts/refresh-wallet-shard.sh
 

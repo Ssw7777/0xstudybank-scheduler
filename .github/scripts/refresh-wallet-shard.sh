@@ -11,6 +11,7 @@ observations_file="$work_dir/observations.ndjson"
 batch_file="$work_dir/observation-batch.json"
 response_file="$work_dir/observation-response.json"
 mode="${MODE:-primary}"
+rate_limited=0
 
 if [[ "$mode" != "primary" && "$mode" != "retry" ]]; then
   echo "::error title=Scheduler configuration::MODE must be primary or retry."
@@ -101,14 +102,15 @@ collect_observation() {
   protocol_file="$work_dir/protocol-${ordinal}.json"
 
   code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
-    --retry 1 --retry-delay 4 --retry-all-errors --fail-with-body \
+    --fail-with-body \
     -H "Accept: application/json" \
     -H "User-Agent: 0xstudybank-scheduler/2.0" \
     -o "$rabby_file" \
     -w '%{http_code}' \
     "${RABBY_TOTAL_URL}?id=${address}" || true)"
   if [[ ! "$code" =~ ^2[0-9][0-9]$ ]]; then
-    echo "::warning title=wallet-${ordinal}::Rabby returned HTTP ${code:-000}; the retry stage will use a fresh runner."
+    if [[ "$code" == "429" ]]; then rate_limited=1; fi
+    echo "::warning title=wallet-${ordinal}::Rabby returned HTTP ${code:-000}; on rate limiting this shard stops and the retry stage is skipped."
     return 1
   fi
 
@@ -116,13 +118,14 @@ collect_observation() {
   if [[ "$(target_field "$index" needsProtocolRefresh)" == "true" ]]; then
     sleep "$RABBY_CALL_INTERVAL_SECONDS"
     protocol_code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
-      --retry 1 --retry-delay 4 --retry-all-errors --fail-with-body \
+      --fail-with-body \
       -H "Accept: application/json" \
       -H "User-Agent: 0xstudybank-scheduler/2.0" \
       -o "$protocol_file" \
       -w '%{http_code}' \
       "${RABBY_PROTOCOL_URL}?id=${address}" || true)"
     if [[ ! "$protocol_code" =~ ^2[0-9][0-9]$ ]]; then
+      if [[ "$protocol_code" == "429" ]]; then rate_limited=1; fi
       rm -f "$protocol_file"
       echo "::warning title=wallet-${ordinal}-protocols::Rabby protocol endpoint returned HTTP ${protocol_code:-000}; cached protocol data is retained."
     fi
@@ -225,6 +228,7 @@ for index in $(seq "$SHARD" "$SHARD_COUNT" 24); do
     failed_wallets=$((failed_wallets + 1))
   fi
   position=$((position + 1))
+  if (( rate_limited > 0 )); then break; fi
 done
 
 observation_count="$(build_batch)"
@@ -242,3 +246,7 @@ if (( batch_failed > 0 )); then
   echo "::warning title=Wallet ${mode}::The collected observations were not persisted in shard ${SHARD}."
 fi
 echo "${mode} shard ${SHARD} completed; candidates=${candidates}, collected=${observation_count}, readFailures=${failed_wallets}, writeFailures=${batch_failed}."
+if (( rate_limited > 0 )); then
+  echo "::error title=Provider rate limit::HTTP 429: stopping further requests; no fresh-runner retry is allowed."
+  exit 75
+fi
