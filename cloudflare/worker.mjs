@@ -24,6 +24,7 @@ export async function dispatchWalletWorkflow(env, now = Date.now(), request = fe
   if (!Array.isArray(body.workflow_runs)) throw new Error('invalid_workflow_runs');
   // Keep one existing runner workflow, never rotate runners to evade a rate limit.
   if (body.workflow_runs.some(run => ['queued','in_progress','waiting','pending','requested'].includes(run.status))) return 'already_running';
+  if (body.workflow_runs.some(run => run.conclusion === 'failure' && now - Date.parse(run.updated_at) < 10 * 60000)) return 'failure_cooldown';
   if (body.workflow_runs.some(run => now - Date.parse(run.created_at) < 5 * 60000)) return 'recently_started';
   const dispatched = await request(`${WORKFLOW}/dispatches`, {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
@@ -169,7 +170,11 @@ export default {
   },
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname !== '/run' || request.method !== 'POST' || !(await authorized(request, env.CRON_SECRET))) return new Response('Not found', { status: 404 });
+    if (!['/run','/wake'].includes(url.pathname) || request.method !== 'POST' || !(await authorized(request, env.CRON_SECRET))) return new Response('Not found', { status: 404 });
+    if (url.pathname === '/wake') {
+      try { return Response.json({ walletDispatch: await dispatchWalletWorkflow(env) }); }
+      catch { return Response.json({ error: 'workflow_wake_failed' }, { status: 502 }); }
+    }
     const slot = Number(url.searchParams.get('slot'));
     if (!url.searchParams.has('slot') || !Number.isInteger(slot) || slot < 0 || slot > 9) return new Response('Invalid slot', { status: 400 });
     try { return Response.json(await runCycle(env, Date.now(), slot)); }

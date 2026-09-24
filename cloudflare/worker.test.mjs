@@ -132,3 +132,12 @@ test('GitHub rejection is reported without leaking credentials or retrying', asy
   }),/github_runs_http_429/);
   assert.equal(calls,2);
 });
+
+test('a recently failed workflow cools down instead of launching new runners', async () => {
+  const result=await dispatchWalletWorkflow({GITHUB_DISPATCH_ENABLED:'true',GITHUB_TOKEN:'test',CRON_SECRET:'test'},Date.now(),async url=>{
+    if(url.endsWith('/api/status')) return Response.json({oldestWalletAgeSeconds:1000});
+    assert.ok(url.includes('/runs?'));
+    return Response.json({workflow_runs:[{status:'completed',conclusion:'failure',updated_at:new Date().toISOString()}]});
+  });
+  assert.equal(result,'failure_cooldown');
+});

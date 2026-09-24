@@ -4,7 +4,21 @@ This public repository contains only the secret-free scheduler for the private
 0xStudyBank dashboard. It does not contain wallet addresses, balances, API keys,
 dashboard credentials, or application source code.
 
-## Current state (2026-09-24)
+## Current state (2026-09-25)
+
+Cloudflare now checks the existing GitHub wallet workflow every minute and wakes
+it only when data is due and no run is queued/running. The GitHub workflow keeps
+collecting data; Cloudflare does not retry its rate-limited direct Rabby path.
+Wallet-only dispatch skips the competing exchange refresh. Failed workflows have
+a ten-minute dispatch cooldown. Primary shards run sequentially; HTTP 429 stops
+the run instead of retrying from another runner. Tokens are Worker secret bindings.
+
+Protocol-detail requests are due after eight minutes, independently of the
+5.5-hour authenticated App-audit quota. This is an intended refresh cadence,
+not an upstream availability guarantee. Real-time acceptance still requires
+observing complete autonomous rounds.
+
+## Previous diagnosis (2026-09-24)
 
 - Cloudflare Worker `studybank-refresh` runs a one-minute cron independently of
   the owner's computer. Every fifth minute it requests a Vercel fast refresh:
