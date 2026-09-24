@@ -4,25 +4,47 @@ This public repository contains only the secret-free scheduler for the private
 0xStudyBank dashboard. It does not contain wallet addresses, balances, API keys,
 dashboard credentials, or application source code.
 
-## Refresh cadence
+## Current state (2026-09-24)
 
-- Each rolling cycle refreshes the three configured exchanges and records a
-  portfolio snapshot at the start and midpoint, keeping that data near a
-  five-minute cadence.
-- Five wallet-only micro-batches run about 135 seconds apart. Each batch
-  refreshes at most five wallets, picking the wallets whose last successful
-  read is oldest first, so addresses that have gone quiet are always checked
-  before fresh ones.
-- After the rolling batches, the run reads the dashboard status endpoint and
-  runs up to three extra stale-only batches (60 seconds apart) for any wallet
-  that still has not succeeded in over 20 minutes, until the queue drains.
-  If the public balance providers keep rate-limiting, the dashboard itself
-  falls back to an authenticated provider for the worst wallets (daily quota
-  capped on the dashboard side).
-- A completed run uses its short-lived GitHub token to queue the next run. A
-  six-hour cron acts only as a watchdog because GitHub cron delivery can be delayed.
-- Each request uses a newly issued, short-lived GitHub OIDC token. No deployment
-  secret is stored in this repository.
+- Cloudflare Worker `studybank-refresh` runs a one-minute cron independently of
+  the owner's computer. Every fifth minute it requests a Vercel fast refresh:
+  exchange balances and a portfolio snapshot. This path has been observed running.
+- **Wallet migration is not complete.** The public Rabby endpoint returned HTTP
+  429 on consecutive autonomous invocations after slowing sequential requests.
+  Successful manual invocations did not establish that scheduled invocations work.
+- `WALLET_POLLING_ENABLED=false` stops failing Cloudflare wallet requests. It does
+  not stop fast refreshes or claim that cached wallet values are fresh.
+- Existing GitHub workflows remain as a best-effort fallback. Delayed schedules
+  do not provide a strict ten-minute freshness guarantee.
+- Do not remove that fallback or claim full migration until a permitted,
+  adequately provisioned data source passes autonomous-cycle acceptance tests.
 
-The separate monthly keepalive workflow creates a harmless heartbeat commit so
-GitHub does not disable scheduled workflows after prolonged repository inactivity.
+## Prepared wallet implementation
+
+When enabled, ten static shards cover all configured addresses every ten minutes
+(up to 50 addresses). Balance and protocol requests are sequential with four-second
+spacing. HTTP 429 stops that shard without immediately retrying the rate limit.
+Other transient source failures receive one retry. Failed reads never become zero.
+
+Vercel writes have bounded backoff and reuse the original observations and timestamps.
+A skipped HTTP 202 refresh is not completion. Partial cycles log failure counts and
+fail the scheduled invocation rather than reporting false success.
+
+`CRON_SECRET` must be a Worker secret binding, never a source-code value.
+`wrangler.jsonc` contains only a non-secret feature flag.
+
+## Tests and acceptance
+
+Run `node --test cloudflare/worker.test.mjs`.
+
+Before enabling wallet polling, observe at least two autonomous full cycles and
+check every wallet's actual success timestamp and protocol timestamp. Inspect the
+application logs, not merely invocation counts. Compare supported wallets with an
+independent source. Do not interpret balance differences as transfers.
+
+## Capacity
+
+At 25 wallets, ten-minute polling requires 3,600 balance requests/day and another
+3,600 protocol requests/day, excluding retries. Fast refreshes are 288/day; cron
+invocations are 1,440/day. A free scheduling quota is not an upstream data quota.
+Real transaction history needs separate adequate query capacity or production webhooks.
