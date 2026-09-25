@@ -12,6 +12,8 @@ batch_file="$work_dir/observation-batch.json"
 response_file="$work_dir/observation-response.json"
 mode="${MODE:-primary}"
 rate_limited=0
+collection_started=$SECONDS
+collection_budget_seconds=240
 
 if [[ "$mode" != "primary" && "$mode" != "retry" ]]; then
   echo "::error title=Scheduler configuration::MODE must be primary or retry."
@@ -89,6 +91,7 @@ target_field() {
     if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet.address)) process.exit(1);
     if (process.env.FIELD === "address") process.stdout.write(wallet.address.toLowerCase());
     else if (process.env.FIELD === "needsProtocolRefresh") process.stdout.write(wallet.needsProtocolRefresh === true ? "true" : "false");
+    else if (process.env.FIELD === "needsTokenRefresh") process.stdout.write(wallet.needsTokenRefresh === true ? "true" : "false");
     else process.stdout.write(wallet.needsRetry === true ? "true" : "false");
   '
 }
@@ -96,10 +99,15 @@ target_field() {
 collect_observation() {
   local index="$1"
   local ordinal="$2"
-  local address rabby_file protocol_file code protocol_code observed_at
+  local address rabby_file protocol_file token_observations_file code protocol_code observed_at
+  local wallet_started token_chain token_file token_code token_observed_at token_timeout remaining_wallet remaining_shard
+  local token_specific_observations_file specific_request specific_file specific_code specific_observed_at specific_ordinal
+  wallet_started=$SECONDS
   address="$(target_field "$index" address)"
   rabby_file="$work_dir/rabby-${ordinal}.json"
   protocol_file="$work_dir/protocol-${ordinal}.json"
+  token_observations_file="$work_dir/tokens-${ordinal}.ndjson"
+  token_specific_observations_file="$work_dir/specific-tokens-${ordinal}.ndjson"
 
   code="$(curl --silent --show-error --connect-timeout 10 --max-time 25 \
     --fail-with-body \
@@ -131,7 +139,131 @@ collect_observation() {
     fi
   fi
 
-  ADDRESS="$address" OBSERVED_AT="$observed_at" RABBY_FILE="$rabby_file" PROTOCOL_FILE="$protocol_file" OBSERVATIONS_FILE="$observations_file" node <<'NODE'
+  # Query an explicit chain_id: all-chain coverage was not established by the
+  # live probe. An HTTP 200 empty response without it must not clear a wallet.
+  # First refresh known token UUIDs across chains in bounded batches, then discover
+  # new holdings on one chain. A missing specific-token result is not a zero.
+  if (( rate_limited == 0 )) && { [[ "$mode" == "primary" ]] || [[ "$(target_field "$index" needsTokenRefresh)" == "true" ]]; }; then
+    specific_ordinal=0
+    while IFS= read -r specific_request; do
+      [[ -n "$specific_request" ]] || continue
+      remaining_wallet=$((100 - (SECONDS - wallet_started)))
+      remaining_shard=$((collection_budget_seconds - (SECONDS - collection_started)))
+      if (( remaining_wallet <= RABBY_CALL_INTERVAL_SECONDS + 2 || remaining_shard <= RABBY_CALL_INTERVAL_SECONDS + 2 )); then
+        echo "::warning title=wallet-${ordinal}-tokens::Known-token collection budget reached; unqueried tokens retain their old audit timestamps."
+        break
+      fi
+      sleep "$RABBY_CALL_INTERVAL_SECONDS"
+      token_timeout=$((100 - (SECONDS - wallet_started)))
+      remaining_shard=$((collection_budget_seconds - (SECONDS - collection_started)))
+      if (( token_timeout > remaining_shard )); then token_timeout=$remaining_shard; fi
+      if (( token_timeout > 25 )); then token_timeout=25; fi
+      specific_ordinal=$((specific_ordinal + 1))
+      specific_file="$work_dir/specific-${ordinal}-${specific_ordinal}.json"
+      specific_code="$(curl --silent --show-error --connect-timeout 10 --max-time "$token_timeout" \
+        --fail-with-body \
+        -X POST \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -H "User-Agent: 0xstudybank-scheduler/2.0" \
+        --data-binary "$specific_request" \
+        -o "$specific_file" \
+        -w '%{http_code}' \
+        "$RABBY_SPECIFIC_TOKEN_URL" || true)"
+      specific_observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      SPECIFIC_REQUEST="$specific_request" SPECIFIC_FILE="$specific_file" SPECIFIC_CODE="${specific_code:-000}" SPECIFIC_OBSERVED_AT="$specific_observed_at" TOKEN_SPECIFIC_OBSERVATIONS_FILE="$token_specific_observations_file" node <<'NODE'
+const fs = require("fs");
+const requestedUuids = JSON.parse(process.env.SPECIFIC_REQUEST).uuids;
+const entry = { requestedUuids, observedAt: process.env.SPECIFIC_OBSERVED_AT };
+const code = process.env.SPECIFIC_CODE;
+if (/^2\d\d$/.test(code)) {
+  try {
+    const body = JSON.parse(fs.readFileSync(process.env.SPECIFIC_FILE, "utf8"));
+    if (!Array.isArray(body)) throw new Error("invalid specific token list");
+    entry.observation = body;
+  } catch {
+    entry.tokenError = "invalid_payload";
+  }
+} else {
+  entry.tokenError = `http_${code}`;
+}
+if (entry.tokenError) console.log(`::warning title=Known-token audit::${entry.tokenError}; previous quantities are retained.`);
+fs.appendFileSync(process.env.TOKEN_SPECIFIC_OBSERVATIONS_FILE, `${JSON.stringify(entry)}\n`);
+NODE
+      if [[ "$specific_code" == "429" ]]; then rate_limited=1; break; fi
+    done < <(TARGETS_FILE="$targets_file" INDEX="$index" ADDRESS="$address" node <<'NODE'
+const fs = require("fs");
+const wallet = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8")).wallets[Number(process.env.INDEX)];
+const uuids = [...new Set((Array.isArray(wallet.tokenUuids) ? wallet.tokenUuids : []).filter(value =>
+  typeof value === "string" && /^[a-zA-Z0-9_-]{1,48}:[a-zA-Z0-9_.-]{1,160}$/.test(value)
+))];
+for (let offset = 0; offset < Math.min(uuids.length, 300); offset += 100) {
+  console.log(JSON.stringify({ id: process.env.ADDRESS, uuids: uuids.slice(offset, offset + 100) }));
+}
+NODE
+    )
+
+    # tokenChains is ordered least recently discovered first by the server.
+    # Querying only one chain per round avoids an unbounded chain-count multiplier.
+    if (( rate_limited == 0 )); then
+    while IFS= read -r token_chain; do
+      [[ -n "$token_chain" ]] || continue
+      remaining_wallet=$((100 - (SECONDS - wallet_started)))
+      remaining_shard=$((collection_budget_seconds - (SECONDS - collection_started)))
+      if (( remaining_wallet <= RABBY_CALL_INTERVAL_SECONDS + 2 || remaining_shard <= RABBY_CALL_INTERVAL_SECONDS + 2 )); then
+        echo "::warning title=wallet-${ordinal}-tokens::Token collection budget reached; unqueried chains keep their previous audit timestamps."
+        break
+      fi
+      sleep "$RABBY_CALL_INTERVAL_SECONDS"
+      token_timeout=$((100 - (SECONDS - wallet_started)))
+      remaining_shard=$((collection_budget_seconds - (SECONDS - collection_started)))
+      if (( token_timeout > remaining_shard )); then token_timeout=$remaining_shard; fi
+      if (( token_timeout > 25 )); then token_timeout=25; fi
+      token_file="$work_dir/token-${ordinal}-${token_chain}.json"
+      token_code="$(curl --silent --show-error --connect-timeout 10 --max-time "$token_timeout" \
+        --fail-with-body \
+        -H "Accept: application/json" \
+        -H "User-Agent: 0xstudybank-scheduler/2.0" \
+        -o "$token_file" \
+        -w '%{http_code}' \
+        "${RABBY_TOKEN_URL}?id=${address}&chain_id=${token_chain}&is_all=true" || true)"
+      token_observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      TOKEN_CHAIN="$token_chain" TOKEN_FILE="$token_file" TOKEN_CODE="${token_code:-000}" TOKEN_OBSERVED_AT="$token_observed_at" TOKEN_OBSERVATIONS_FILE="$token_observations_file" node <<'NODE'
+const fs = require("fs");
+const entry = { chain: process.env.TOKEN_CHAIN, observedAt: process.env.TOKEN_OBSERVED_AT };
+const code = process.env.TOKEN_CODE;
+if (/^2\d\d$/.test(code)) {
+  try {
+    const body = JSON.parse(fs.readFileSync(process.env.TOKEN_FILE, "utf8"));
+    if (!Array.isArray(body)) throw new Error("invalid token list");
+    entry.observation = body;
+  } catch {
+    entry.tokenError = "invalid_payload";
+  }
+} else {
+  entry.tokenError = `http_${code}`;
+}
+if (entry.tokenError) console.log(`::warning title=Token audit::Chain ${entry.chain}: ${entry.tokenError}; previous quantities are retained.`);
+fs.appendFileSync(process.env.TOKEN_OBSERVATIONS_FILE, `${JSON.stringify(entry)}\n`);
+NODE
+      if [[ "$token_code" == "429" ]]; then rate_limited=1; break; fi
+    done < <(TARGETS_FILE="$targets_file" INDEX="$index" RABBY_FILE="$rabby_file" node <<'NODE'
+const fs = require("fs");
+const wallet = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8")).wallets[Number(process.env.INDEX)];
+const balance = JSON.parse(fs.readFileSync(process.env.RABBY_FILE, "utf8"));
+const validChain = (value) => typeof value === "string" && /^[a-zA-Z0-9_-]{1,48}$/.test(value);
+const planned = Array.isArray(wallet.tokenChains) ? wallet.tokenChains.filter(validChain) : [];
+const observed = Array.isArray(balance.chain_list)
+  ? balance.chain_list.filter((chain) => Number(chain.usd_value ?? chain.total_usd_value ?? 0) > 0).map((chain) => chain.id).filter(validChain)
+  : [];
+const chains = [...new Set([...planned, ...observed])].slice(0, 1);
+for (const chain of chains) console.log(chain);
+NODE
+    )
+    fi
+  fi
+
+  ADDRESS="$address" OBSERVED_AT="$observed_at" RABBY_FILE="$rabby_file" PROTOCOL_FILE="$protocol_file" TOKEN_OBSERVATIONS_FILE="$token_observations_file" TOKEN_SPECIFIC_OBSERVATIONS_FILE="$token_specific_observations_file" OBSERVATIONS_FILE="$observations_file" node <<'NODE'
 const fs = require("fs");
 const observation = JSON.parse(fs.readFileSync(process.env.RABBY_FILE, "utf8"));
 const total = Number(observation && (observation.total_usd_value ?? observation.total_usd));
@@ -153,6 +285,14 @@ if (process.env.PROTOCOL_FILE && fs.existsSync(process.env.PROTOCOL_FILE)) {
   } catch {
     console.log(`::warning title=wallet-protocols::Invalid protocol payload for wallet ${process.env.ADDRESS.slice(0, 6)}…; cached data is retained.`);
   }
+}
+if (fs.existsSync(process.env.TOKEN_OBSERVATIONS_FILE)) {
+  const tokens = fs.readFileSync(process.env.TOKEN_OBSERVATIONS_FILE, "utf8").trim();
+  if (tokens) entry.tokenObservations = tokens.split(/\r?\n/).map((line) => JSON.parse(line));
+}
+if (fs.existsSync(process.env.TOKEN_SPECIFIC_OBSERVATIONS_FILE)) {
+  const tokens = fs.readFileSync(process.env.TOKEN_SPECIFIC_OBSERVATIONS_FILE, "utf8").trim();
+  if (tokens) entry.tokenSpecificObservations = tokens.split(/\r?\n/).map((line) => JSON.parse(line));
 }
 fs.appendFileSync(process.env.OBSERVATIONS_FILE, `${JSON.stringify(entry)}\n`);
 NODE
@@ -217,8 +357,15 @@ failed_wallets=0
 candidates=0
 position=0
 for index in $(seq "$SHARD" "$SHARD_COUNT" 24); do
+  # Token staleness alone must not re-read an otherwise fresh wallet balance.
+  # Its ordered chain queue continues during the next primary round.
   if [[ "$mode" == "retry" ]] && [[ "$(target_field "$index" needsRetry)" != "true" ]]; then
     continue
+  fi
+
+  if (( SECONDS - collection_started >= collection_budget_seconds )); then
+    echo "::warning title=Wallet collection::Shard collection budget reached; submitting completed observations before the runner timeout."
+    break
   fi
 
   if (( position > 0 )); then sleep "$RABBY_CALL_INTERVAL_SECONDS"; fi

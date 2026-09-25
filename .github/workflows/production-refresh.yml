@@ -28,6 +28,8 @@ env:
   STATUS_URL: https://0xstudybank.vercel.app/api/status
   RABBY_TOTAL_URL: https://api.rabby.io/v1/user/total_balance
   RABBY_PROTOCOL_URL: https://api.rabby.io/v1/user/complex_protocol_list
+  RABBY_TOKEN_URL: https://api.rabby.io/v1/user/token_list
+  RABBY_SPECIFIC_TOKEN_URL: https://api.rabby.io/v1/user/specific_token_list
   SHARD_COUNT: "5"
   RABBY_CALL_INTERVAL_SECONDS: "4"
   BATCH_STAGGER_SECONDS: "5"
@@ -90,7 +92,9 @@ jobs:
     needs: fast-refresh
     if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Includes the bounded collection budget and write retries; normal completion
+    # does not wait for this limit.
+    timeout-minutes: 10
     strategy:
       # A provider 429 fails the shard and cancels queued shards rather than
       # continuing from a different runner/IP.
@@ -115,7 +119,7 @@ jobs:
     needs: refresh-wallets
     if: ${{ always() && needs.refresh-wallets.result == 'success' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -211,9 +215,26 @@ jobs:
             const retryCount = targets.wallets.filter((wallet) => wallet.needsRetry === true).length;
             if (retryCount !== 0) failures.push(`${retryCount} wallets remain older than the retry threshold`);
           }
+          const audit = status.tokenAudit;
+          const tokenWarnings = [];
+          if (!audit || typeof audit !== "object") {
+            tokenWarnings.push("token audit status unavailable; token quantities are not verified");
+          } else {
+            if (Number(audit.freshWallets) !== Number(status.walletCount)) {
+              tokenWarnings.push(`only ${audit.freshWallets ?? "unknown"}/${status.walletCount} wallets have fresh token quantities`);
+            }
+            for (const field of ["staleWallets", "failedWallets", "missingWallets", "invalidRows", "duplicateRows", "aggregateMismatches"]) {
+              if (!Number.isInteger(audit[field]) || audit[field] !== 0) tokenWarnings.push(`token ${field}: ${audit[field] ?? "unknown"}`);
+            }
+            if (audit.healthy !== true && tokenWarnings.length === 0) tokenWarnings.push("token audit is not healthy");
+          }
+          for (const warning of tokenWarnings) console.log(`::warning title=Token quantity audit::${warning}.`);
           if (failures.length) {
             for (const failure of failures) console.log(`::error title=Production freshness::${failure}.`);
             process.exit(1);
           }
-          console.log("Production verified: snapshot current, 25/25 wallets, App audits, and protocol audits fresh.");
+          console.log("Balance freshness verified: snapshot current, 25/25 wallet totals, App audits, and protocol audits fresh.");
+          console.log(tokenWarnings.length
+            ? "Token audit remains incomplete; older quantities are explicitly flagged and their per-chain queue continues next round."
+            : "Token audit verified: every configured wallet is fresh, with no invalid rows, duplicate rows, or aggregation mismatches.");
           NODE
