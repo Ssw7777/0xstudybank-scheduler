@@ -30,9 +30,6 @@ env:
   RABBY_PROTOCOL_URL: https://api.rabby.io/v1/user/complex_protocol_list
   RABBY_TOKEN_URL: https://api.rabby.io/v1/user/token_list
   RABBY_SPECIFIC_TOKEN_URL: https://api.rabby.io/v1/user/specific_token_list
-  SHARD_COUNT: "5"
-  RABBY_CALL_INTERVAL_SECONDS: "4"
-  BATCH_STAGGER_SECONDS: "5"
 
 jobs:
   fast-refresh:
@@ -88,58 +85,24 @@ jobs:
           fi
 
   refresh-wallets:
-    name: primary-shard-${{ matrix.shard }}
+    name: oldest-first-wallet-cycle
     needs: fast-refresh
     if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
     runs-on: ubuntu-latest
     # Includes the bounded collection budget and write retries; normal completion
     # does not wait for this limit.
-    timeout-minutes: 10
-    strategy:
-      # A provider 429 fails the shard and cancels queued shards rather than
-      # continuing from a different runner/IP.
-      fail-fast: true
-      max-parallel: 1
-      matrix:
-        shard: [0, 1, 2, 3, 4]
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
-    env:
-      SHARD: ${{ matrix.shard }}
-      MODE: primary
     steps:
       - uses: actions/checkout@v4
-      - name: Collect and submit primary wallet shard
-        shell: bash
-        run: bash .github/scripts/refresh-wallet-shard.sh
-
-  retry-stale-wallets:
-    name: retry-shard-${{ matrix.shard }}
-    needs: refresh-wallets
-    if: ${{ always() && needs.refresh-wallets.result == 'success' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        shard: [0, 1, 2, 3, 4]
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      SHARD: ${{ matrix.shard }}
-      MODE: retry
-    steps:
-      - uses: actions/checkout@v4
-      - name: Retry transient failures only when no provider rate limit occurred
-        shell: bash
-        run: bash .github/scripts/refresh-wallet-shard.sh
+      - name: Collect all totals before token and protocol details
+        run: node .github/scripts/refresh-wallet-cycle.mjs
 
   finalize:
     name: verify-production-freshness
-    needs: [fast-refresh, refresh-wallets, retry-stale-wallets]
+    needs: [fast-refresh, refresh-wallets]
     if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -200,20 +163,18 @@ jobs:
             failures.push(`latest snapshot is ${status.refreshAgeSeconds ?? "unknown"} seconds old`);
           }
           if (!Number.isInteger(status.snapshotCount) || status.snapshotCount < 1) failures.push("no portfolio snapshot exists");
-          if (Number(status.walletCount) !== 25) failures.push(`configured wallet count is ${status.walletCount}, expected 25`);
-          if (Number(status.walletsLive) !== 25) failures.push(`only ${status.walletsLive}/25 wallets are live`);
-          if (Number(status.walletsOver20min) !== 0) failures.push(`${status.walletsOver20min} wallets exceed 20 minutes`);
-          if (Number(status.appsFresh) !== 25 || Number(status.appsStale) !== 0) {
-            failures.push(`only ${status.appsFresh}/25 App audits are fresh`);
+          const count = Number(status.walletCount);
+          if (!Number.isInteger(count) || count < 1 || count > 50) failures.push("invalid configured wallet count");
+          if (Number(status.walletsLive) !== count) failures.push(`only ${status.walletsLive}/${count} wallets are live`);
+          if (Number(status.walletsOver10min) !== 0) failures.push(`${status.walletsOver10min} wallets exceed 10 minutes`);
+          if (Number(status.appsFresh) !== count || Number(status.appsStale) !== 0) {
+            failures.push(`only ${status.appsFresh}/${count} App audits are fresh`);
           }
-          if (Number(status.protocolsFresh) !== 25 || Number(status.protocolsStale) !== 0) {
-            failures.push(`only ${status.protocolsFresh}/25 protocol audits are fresh`);
+          if (Number(status.protocolsFresh) !== count || Number(status.protocolsStale) !== 0) {
+            failures.push(`only ${status.protocolsFresh}/${count} protocol audits are fresh`);
           }
-          if (targets.ok !== true || !Array.isArray(targets.wallets) || targets.wallets.length !== 25) {
-            failures.push("wallet manifest is not exactly 25 addresses");
-          } else {
-            const retryCount = targets.wallets.filter((wallet) => wallet.needsRetry === true).length;
-            if (retryCount !== 0) failures.push(`${retryCount} wallets remain older than the retry threshold`);
+          if (targets.ok !== true || !Array.isArray(targets.wallets) || targets.wallets.length !== count) {
+            failures.push("wallet manifest does not match configured addresses");
           }
           const audit = status.tokenAudit;
           const tokenWarnings = [];
@@ -233,7 +194,7 @@ jobs:
             for (const failure of failures) console.log(`::error title=Production freshness::${failure}.`);
             process.exit(1);
           }
-          console.log("Balance freshness verified: snapshot current, 25/25 wallet totals, App audits, and protocol audits fresh.");
+          console.log(`Freshness verified: snapshot current, ${count}/${count} wallet totals within ten minutes; App/protocol audits meet their separate checks.`);
           console.log(tokenWarnings.length
             ? "Token audit remains incomplete; older quantities are explicitly flagged and their per-chain queue continues next round."
             : "Token audit verified: every configured wallet is fresh, with no invalid rows, duplicate rows, or aggregation mismatches.");
