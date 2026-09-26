@@ -86,3 +86,18 @@ test('multiple token batches for one wallet never duplicate addresses in ingesti
   assert.equal(result.balances,1);
   assert.equal(h.writes.filter(e => e.tokenSpecificObservations).length,3);
 });
+test('all totals are durably written before entering the detail phase', async () => {
+  const h = harness();
+  const read = h.io.read;
+  h.io.read = async (stage, wallet) => {
+    if (stage !== 'balance') assert.equal(h.writes.filter(e => !e.tokenSpecificObservations && !e.protocolObservation && !e.tokenObservations).length,25);
+    return read(stage, wallet);
+  };
+  await collectCycle(wallets,h.io);
+});
+test('failed durable write stops collection instead of claiming the cycle completed', async () => {
+  const h = harness();
+  h.io.persist = async () => { throw new Error('database_unavailable'); };
+  await assert.rejects(collectCycle(wallets,h.io), /database_unavailable/);
+  assert.equal(h.calls.length,5);
+});

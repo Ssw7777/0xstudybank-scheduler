@@ -76,7 +76,7 @@ export async function collectCycle(wallets, io, options = {}) {
   // or protocol endpoints. Failed specific-token requests are recorded, not zeroed.
   const available = wallets.filter(w => totals.has(w.address));
   for (const wallet of oldestFirst(available, 'tokenAttemptAt', rotation)) {
-    const uuids = [...new Set((wallet.tokenUuids ?? []).filter(id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,48}:[a-zA-Z0-9_.-]{1,160}$/.test(id)))];
+    const uuids = [...new Set((wallet.tokenUuids ?? []).filter(id => typeof id === 'string' && /^[a-z0-9_-]{1,40}:(0x[a-f0-9]{40}|[a-z0-9_-]{1,40})$/.test(id)))];
     for (let offset = 0; offset < Math.min(uuids.length, 300); offset += 100) {
       if (!canRead()) break;
       const requestedUuids = uuids.slice(offset, offset + 100);
@@ -108,7 +108,7 @@ export async function collectCycle(wallets, io, options = {}) {
     if (!canRead()) break;
     const observed = totals.get(wallet.address).observation.chain_list
       .filter(c => Number(c.usd_value ?? c.total_usd_value ?? 0) > 0).map(c => c.id);
-    const chain = [...(wallet.tokenChains ?? []), ...observed].find(c => typeof c === 'string' && /^[a-zA-Z0-9_-]{1,48}$/.test(c));
+    const chain = [...(wallet.tokenChains ?? []), ...observed].find(c => typeof c === 'string' && /^[a-z0-9_-]{1,40}$/.test(c));
     if (!chain) continue;
     const result = await read('discovery', wallet, chain);
     const detail = { chain, observedAt: new Date(now()).toISOString() };
@@ -185,5 +185,9 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(() => { console.error('::error::Wallet collector failed; no success timestamp fabricated.'); process.exitCode = 1; });
+  main().catch(error => {
+    const safeReason = /^(site_http_|oidc_|invalid_)[a-zA-Z0-9_]+$/.test(error?.message ?? '') ? error.message : 'collection_failed';
+    console.error(`::error::Wallet collector ${safeReason}; no success timestamp fabricated.`);
+    process.exitCode = 1;
+  });
 }
