@@ -175,7 +175,10 @@ async function main() {
         });
         if (!response.ok) { await response.body?.cancel(); throw Object.assign(new Error('provider_request_failed'), { status: response.status }); }
         return { body: await response.json() };
-      } finally { nextProviderAt = Date.now() + 5000; }
+      // Production returned 429 on request eleven within one minute at 5s.
+      // Eight seconds between completions reduces pressure below that observed
+      // ceiling; it is not a claim that the public API guarantees this quota.
+      } finally { nextProviderAt = Date.now() + 8000; }
     },
   }, { rotation: Number(env.GITHUB_RUN_NUMBER ?? 0) });
   console.log(JSON.stringify(report));
