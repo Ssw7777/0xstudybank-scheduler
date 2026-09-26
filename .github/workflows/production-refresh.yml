@@ -92,18 +92,27 @@ jobs:
     # Includes the bounded collection budget and write retries; normal completion
     # does not wait for this limit.
     timeout-minutes: 15
+    outputs:
+      allowed: ${{ steps.cooldown.outputs.allowed }}
     permissions:
       contents: read
       id-token: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
+      - name: Respect cooldown for scheduled and dispatched runs alike
+        id: cooldown
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/provider-cooldown.mjs
       - name: Collect all totals before token and protocol details
+        if: ${{ steps.cooldown.outputs.allowed == 'true' }}
         run: node .github/scripts/refresh-wallet-cycle.mjs
 
   finalize:
     name: verify-production-freshness
     needs: [fast-refresh, refresh-wallets]
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
+    if: ${{ always() && needs.refresh-wallets.outputs.allowed == 'true' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:

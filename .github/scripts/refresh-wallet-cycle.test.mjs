@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectCycle, oldestFirst, validateManifest } from './refresh-wallet-cycle.mjs';
+import { needsCooldown } from './provider-cooldown.mjs';
 
 const wallets = Array.from({ length: 25 }, (_, i) => ({
   address: `0x${(i + 1).toString(16).padStart(40, '0')}`,
@@ -107,4 +108,12 @@ test('protocol backlog cannot consume every discovery slot', async () => {
   const details = h.calls.filter(c => ['protocols','discovery'].includes(c.stage));
   assert.deepEqual(details.slice(0,4).map(c=>c.stage), ['protocols','discovery','protocols','discovery']);
   assert.equal(details.filter(c=>c.stage==='discovery').length,25);
+});
+test('scheduled backup respects the same cooldown as Cloudflare; skipped success does not extend it', () => {
+  const now = 1_000_000;
+  const failed = {id:1,conclusion:'failure',updated_at:new Date(now - 300_000).toISOString()};
+  const skipped = {id:2,conclusion:'success',updated_at:new Date(now).toISOString()};
+  assert.equal(needsCooldown([failed,skipped],3,now),true);
+  assert.equal(needsCooldown([failed,skipped],3,now+300_001),false);
+  assert.equal(needsCooldown([failed],1,now),false);
 });
