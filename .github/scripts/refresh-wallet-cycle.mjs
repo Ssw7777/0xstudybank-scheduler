@@ -91,21 +91,26 @@ export async function collectCycle(wallets, io, options = {}) {
   }
   await flush();
 
-  // Phase 3 uses a rotating order; one broken protocol cannot permanently pin
-  // the detail queue to the same address. Successful totals are already durable.
-  for (const wallet of oldestFirst(available, 'protocolUpdatedAt', rotation)) {
-    if (!canRead()) break;
-    if (wallet.needsProtocolRefresh !== true) continue;
-    const result = await read('protocols', wallet);
-    const body = result.body;
-    if (!result.error && (Array.isArray(body) || Array.isArray(body?.data) || Array.isArray(body?.list) || Array.isArray(body?.data?.list))) {
-      await save({ ...totals.get(wallet.address), protocolObservation: body });
-      report.details++;
-    }
+  // Interleave protocol and new-asset discovery work. A permanently due protocol
+  // backlog must not consume every remaining slot and starve discovery forever.
+  const protocols = oldestFirst(available, 'protocolUpdatedAt', rotation).filter(w => w.needsProtocolRefresh === true);
+  const discovery = oldestFirst(available, 'tokenDiscoveryAt', rotation);
+  const tasks = [];
+  for (let i = 0; i < Math.max(protocols.length, discovery.length); i++) {
+    if (protocols[i]) tasks.push({ stage: 'protocols', wallet: protocols[i] });
+    if (discovery[i]) tasks.push({ stage: 'discovery', wallet: discovery[i] });
   }
-  await flush();
-  for (const wallet of oldestFirst(available, 'tokenAttemptAt', rotation)) {
+  for (const { stage, wallet } of tasks) {
     if (!canRead()) break;
+    if (stage === 'protocols') {
+      const result = await read('protocols', wallet);
+      const body = result.body;
+      if (!result.error && (Array.isArray(body) || Array.isArray(body?.data) || Array.isArray(body?.list) || Array.isArray(body?.data?.list))) {
+        await save({ ...totals.get(wallet.address), protocolObservation: body });
+        report.details++;
+      }
+      continue;
+    }
     const observed = totals.get(wallet.address).observation.chain_list
       .filter(c => Number(c.usd_value ?? c.total_usd_value ?? 0) > 0).map(c => c.id);
     const chain = [...(wallet.tokenChains ?? []), ...observed].find(c => typeof c === 'string' && /^[a-z0-9_-]{1,40}$/.test(c));

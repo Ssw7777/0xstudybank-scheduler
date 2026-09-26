@@ -101,3 +101,10 @@ test('failed durable write stops collection instead of claiming the cycle comple
   await assert.rejects(collectCycle(wallets,h.io), /database_unavailable/);
   assert.equal(h.calls.length,5);
 });
+test('protocol backlog cannot consume every discovery slot', async () => {
+  const h = harness();
+  await collectCycle(wallets,h.io);
+  const details = h.calls.filter(c => ['protocols','discovery'].includes(c.stage));
+  assert.deepEqual(details.slice(0,4).map(c=>c.stage), ['protocols','discovery','protocols','discovery']);
+  assert.equal(details.filter(c=>c.stage==='discovery').length,25);
+});
