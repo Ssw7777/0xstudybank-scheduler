@@ -108,6 +108,15 @@ test('cloud trigger dispatches stale wallets once using only the existing workfl
   assert.equal(urls.length,3);
 });
 
+test('RPC quantity lane runs independently while public wallet polling is paused',async()=>{
+  const original=globalThis.fetch,paths=[];
+  globalThis.fetch=async(url)=>{paths.push(url);return Response.json({ok:true,chains:[{chain:'eth',failed:0}]});};
+  try{
+    const result=await runCycle({CRON_SECRET:'test',WALLET_POLLING_ENABLED:'false',RPC_POLLING_ENABLED:'true'},60000);
+    assert.equal(result.rpc,'accepted');assert.deepEqual(paths,['https://0xstudybank.vercel.app/api/cron/rpc-refresh']);
+  }finally{globalThis.fetch=original;}
+});
+
 test('cloud trigger does not duplicate queued/running jobs or fresh data', async () => {
   const env={GITHUB_DISPATCH_ENABLED:'true',GITHUB_TOKEN:'test',CRON_SECRET:'test'};
   for(const state of ['queued','in_progress','waiting']) {

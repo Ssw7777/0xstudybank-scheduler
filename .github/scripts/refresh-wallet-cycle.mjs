@@ -52,7 +52,22 @@ export async function collectCycle(wallets, io, options = {}) {
     }
   }
 
-  // Phase 1 MUST complete before any detail request. Persist every five wallets,
+  // Reserve independent protocol slots BEFORE totals. Otherwise a total API
+  // rate limit can starve withdrawals indefinitely. Persist without a new total.
+  const protocolVisited = new Set();
+  if (io.persistProtocols) {
+    for (const wallet of oldestFirst(wallets, 'protocolUpdatedAt', rotation).filter(w=>w.needsProtocolRefresh).slice(0,5)) {
+      if (!canRead()) break;
+      const result=await read('protocols',wallet);
+      if(result.error)continue;
+      const body=result.body;
+      if(!(Array.isArray(body)||Array.isArray(body?.data)||Array.isArray(body?.list)||Array.isArray(body?.data?.list))){report.readFailures++;continue;}
+      await io.persistProtocols([{address:wallet.address,observedAt:new Date(now()).toISOString(),observation:body}]);
+      protocolVisited.add(wallet.address);report.details++;
+    }
+  }
+
+  // Persist every five wallets,
   // and also persist a partial batch on rate limit or budget exhaustion.
   for (const wallet of oldestFirst(wallets, 'lastSuccessAt', rotation)) {
     if (!canRead()) break;
@@ -93,7 +108,7 @@ export async function collectCycle(wallets, io, options = {}) {
 
   // Interleave protocol and new-asset discovery work. A permanently due protocol
   // backlog must not consume every remaining slot and starve discovery forever.
-  const protocols = oldestFirst(available, 'protocolUpdatedAt', rotation).filter(w => w.needsProtocolRefresh === true);
+  const protocols = oldestFirst(available, 'protocolUpdatedAt', rotation).filter(w => w.needsProtocolRefresh === true && !protocolVisited.has(w.address));
   const discovery = oldestFirst(available, 'tokenDiscoveryAt', rotation);
   const tasks = [];
   for (let i = 0; i < Math.max(protocols.length, discovery.length); i++) {
@@ -153,7 +168,7 @@ async function main() {
         });
         data = await response.json();
       } catch { /* Retry a lost response with the same observation and key. */ }
-      if (response?.ok && data?.ok === true && (!body || data.ran === 'wallet-observations')) return data;
+      if (response?.ok && data?.ok === true && (!body || data.ran === (new URL(url).pathname.endsWith('/protocol-observation')?'protocol-observations':'wallet-observations'))) return data;
       if (attempt >= delays.length || (response && response.status >= 400 && response.status < 500 && ![408,409,429].includes(response.status)))
         throw new Error(`site_http_${response?.status ?? 'network'}_not_accepted`);
       await pause(delays[attempt]);
@@ -163,6 +178,10 @@ async function main() {
   const endpoints = { balance: env.RABBY_TOTAL_URL, tokens: env.RABBY_SPECIFIC_TOKEN_URL, protocols: env.RABBY_PROTOCOL_URL, discovery: env.RABBY_TOKEN_URL };
   const report = await collectCycle(wallets, {
     log: text => console.log(text),
+    persistProtocols: async observations => {
+      await site(new URL('/api/cron/protocol-observation',env.OBSERVATION_URL).href,{observations},`${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-protocol-${sequence++}`);
+      console.log(`Persisted ${observations.length} independent protocol observations.`);
+    },
     persist: async observations => {
       await site(env.OBSERVATION_URL, { observations }, `${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-cycle-${sequence++}`);
       console.log(`Persisted ${observations.length} observations.`);

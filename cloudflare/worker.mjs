@@ -135,6 +135,13 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
     if (!accepted.ok || accepted.ran !== 'wallet-observations') throw new Error('observation_not_accepted');
   }
   let snapshot = 'not_due';
+  let rpc='disabled';
+  if(env.RPC_POLLING_ENABLED==='true' && manualSlot===undefined){
+    try{
+      const checked=await jsonRequest(`${SITE}/api/cron/rpc-refresh`,{method:'POST',headers},55000);
+      rpc=checked.ok===true?(checked.chains?.some(c=>c.failed>0)?'partial':'accepted'):'failed';
+    }catch(error){rpc='failed';failures.push({stage:'rpc',reason:String(error?.message??'rpc_failed').slice(0,160)});}
+  }
   let walletDispatch = 'not_due';
   if (manualSlot === undefined) {
     try { walletDispatch = await dispatchWalletWorkflow(env, scheduledTime); }
@@ -146,7 +153,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
     }, 55000);
     snapshot = result.ok && result.reason !== 'refresh_in_progress' ? 'accepted' : 'not_completed';
   }
-  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed' && walletDispatch !== 'failed', walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', walletDispatch, slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
+  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed' && walletDispatch !== 'failed' && !['failed','partial'].includes(rpc), rpc, walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', walletDispatch, slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
   console.log(JSON.stringify(result));
   return result;
 }

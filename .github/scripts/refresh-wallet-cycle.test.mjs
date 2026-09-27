@@ -117,3 +117,12 @@ test('scheduled backup respects the same cooldown as Cloudflare; skipped success
   assert.equal(needsCooldown([failed,skipped],3,now+300_001),false);
   assert.equal(needsCooldown([failed],1,now),false);
 });
+
+test('independent protocol slots persist withdrawals even when first total is rate limited',async()=>{
+  const h=harness(stage=>stage==='balance'),protocols=[];
+  h.io.persistProtocols=async rows=>protocols.push(...rows);
+  const result=await collectCycle(wallets,h.io);
+  assert.equal(protocols.length,5);assert.deepEqual(protocols[0].observation,[]);
+  assert.equal(result.balances,0);assert.equal(result.rateLimited,true);
+  assert.deepEqual(h.calls.map(c=>c.stage),[...Array(5).fill('protocols'),'balance']);
+});
