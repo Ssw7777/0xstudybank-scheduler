@@ -13,6 +13,10 @@ on:
         description: Skip exchange refresh when the cloud scheduler already refreshed it
         type: boolean
         default: false
+      protocol_wallet_id:
+        description: Optional configured wallet ID to recheck first (normal rate-limit cooldown still applies)
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -105,8 +109,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node .github/scripts/provider-cooldown.mjs
-      - name: Collect all totals before token and protocol details
+      - name: Collect independent protocol observations and oldest wallet totals
         if: ${{ steps.cooldown.outputs.allowed == 'true' }}
+        env:
+          PROTOCOL_WALLET_ID: ${{ inputs.protocol_wallet_id }}
         run: node .github/scripts/refresh-wallet-cycle.mjs
 
   finalize:

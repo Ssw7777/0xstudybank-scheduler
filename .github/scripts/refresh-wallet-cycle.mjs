@@ -56,7 +56,9 @@ export async function collectCycle(wallets, io, options = {}) {
   // rate limit can starve withdrawals indefinitely. Persist without a new total.
   const protocolVisited = new Set();
   if (io.persistProtocols) {
-    for (const wallet of oldestFirst(wallets, 'protocolUpdatedAt', rotation).filter(w=>w.needsProtocolRefresh).slice(0,5)) {
+    const dueProtocols=oldestFirst(wallets, 'protocolUpdatedAt', rotation).filter(w=>w.needsProtocolRefresh);
+    if(options.protocolWalletId)dueProtocols.sort((a,b)=>Number(b.id===options.protocolWalletId)-Number(a.id===options.protocolWalletId));
+    for (const wallet of dueProtocols.slice(0,5)) {
       if (!canRead()) break;
       const result=await read('protocols',wallet);
       if(result.error)continue;
@@ -204,7 +206,7 @@ async function main() {
       // ceiling; it is not a claim that the public API guarantees this quota.
       } finally { nextProviderAt = Date.now() + 8000; }
     },
-  }, { rotation: Number(env.GITHUB_RUN_NUMBER ?? 0) });
+  }, { rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),protocolWalletId:env.PROTOCOL_WALLET_ID });
   console.log(JSON.stringify(report));
   if (report.rateLimited) { console.log('::error::Provider HTTP 429; stopped all further provider requests. No runner retry.'); process.exitCode = 75; }
   else if (report.balances !== wallets.length) { console.log('::error::Incomplete wallet totals; oldest wallets remain first next cycle.'); process.exitCode = 1; }
