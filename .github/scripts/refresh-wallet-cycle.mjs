@@ -146,6 +146,8 @@ export async function collectCycle(wallets, io, options = {}) {
 async function main() {
   const env = process.env;
   let auth, authAt = 0, sequence = 0, nextProviderAt = 0;
+  const providerStartedAt=Date.now();
+  let providerRequests=0;
   async function authorization() {
     if (auth && Date.now() - authAt < 180_000) return auth;
     const url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
@@ -199,6 +201,15 @@ async function main() {
           headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': '0xstudybank-scheduler/3.0' },
           ...(stage === 'tokens' ? { body: JSON.stringify({ id: wallet.address, uuids: extra }) } : {}),
         });
+        providerRequests++;
+        // Only publish numeric quota metadata, never wallet addresses, bodies,
+        // credentials or provider cookies in this public repository's logs.
+        const quota={};
+        for(const name of ['retry-after','ratelimit-limit','ratelimit-remaining','ratelimit-reset','x-ratelimit-limit','x-ratelimit-remaining','x-ratelimit-reset']){
+          const value=response.headers.get(name);
+          if(value && /^[0-9.,;= a-z-]{1,100}$/i.test(value))quota[name]=value;
+        }
+        console.log(JSON.stringify({provider:'rabby',stage,status:response.status,request:providerRequests,elapsedSeconds:Math.round((Date.now()-providerStartedAt)/1000),quota}));
         if (!response.ok) { await response.body?.cancel(); throw Object.assign(new Error('provider_request_failed'), { status: response.status }); }
         return { body: await response.json() };
       // Production returned 429 on request eleven within one minute at 5s.

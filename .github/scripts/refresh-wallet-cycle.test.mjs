@@ -126,3 +126,11 @@ test('independent protocol slots persist withdrawals even when first total is ra
   assert.equal(result.balances,0);assert.equal(result.rateLimited,true);
   assert.deepEqual(h.calls.map(c=>c.stage),[...Array(5).fill('protocols'),'balance']);
 });
+
+test('one requested protocol recheck leads the bounded batch without changing the balance queue',async()=>{
+  const h=harness(stage=>stage==='balance');h.io.persistProtocols=async()=>{};
+  const configured=wallets.map((w,i)=>({...w,id:`w${i}`}));
+  await collectCycle(configured,h.io,{protocolWalletId:'w24'});
+  assert.equal(h.calls[0].address,configured[24].address);
+  assert.equal(h.calls.length,6);assert.equal(h.calls.at(-1).address,configured[0].address);
+});
