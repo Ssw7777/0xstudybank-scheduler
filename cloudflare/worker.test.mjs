@@ -117,6 +117,18 @@ test('RPC quantity lane runs independently while public wallet polling is paused
   }finally{globalThis.fetch=original;}
 });
 
+test('Web3 lane is cloud-triggered without wallet addresses or keys in worker, independent of Rabby',async()=>{
+  const original=globalThis.fetch,paths=[];
+  globalThis.fetch=async(url,options)=>{
+    paths.push(url);assert.equal(options.headers.Authorization,'Bearer test');
+    return Response.json({ok:true,ran:'web3-observations',updated:5});
+  };
+  try{
+    const result=await runCycle({CRON_SECRET:'test',WALLET_POLLING_ENABLED:'false',WEB3_POLLING_ENABLED:'true'},60000);
+    assert.equal(result.web3,'accepted');assert.deepEqual(paths,['https://0xstudybank.vercel.app/api/cron/web3-refresh']);
+  }finally{globalThis.fetch=original;}
+});
+
 test('cloud trigger does not duplicate queued/running jobs or fresh data', async () => {
   const env={GITHUB_DISPATCH_ENABLED:'true',GITHUB_TOKEN:'test',CRON_SECRET:'test'};
   for(const state of ['queued','in_progress','waiting']) {

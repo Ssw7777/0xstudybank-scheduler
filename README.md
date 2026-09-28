@@ -4,7 +4,25 @@ This public repository contains only the secret-free scheduler for the private
 0xStudyBank dashboard. It does not contain wallet addresses, balances, API keys,
 dashboard credentials, or application source code.
 
-## Current state (2026-09-25)
+## Current state (2026-09-29)
+
+Cloudflare's existing one-minute cron now also calls the dashboard's independent
+RPC quantity audit and OKX OnchainOS read-only observation routes. Wallet addresses
+and provider credentials remain in the private dashboard, not this repository.
+`RPC_POLLING_ENABLED=true` and `WEB3_POLLING_ENABLED=true` enable these lanes.
+`WALLET_POLLING_ENABLED=false` keeps the rate-limited direct Rabby path paused;
+the existing GitHub dispatch is still a best-effort fallback for complete totals
+and protocol lists. Fast exchange/snapshot refreshes remain every five minutes.
+
+Successful RPC or Web3 token queries do NOT make complete wallet totals, all
+protocols, unsupported chains, or complete transaction history current. Keep
+freshness acceptance separate. No paid service or rate-limit evasion is enabled.
+
+Run `node --test cloudflare/worker.test.mjs .github/scripts/refresh-wallet-cycle.test.mjs`.
+The 2026-09-29 check passed all 26 tests; full ten-minute wallet-total acceptance
+has not passed.
+
+## Previous state (2026-09-25)
 
 Cloudflare now checks the existing GitHub wallet workflow every minute and wakes
 it only when data is due and no run is queued/running. The GitHub workflow keeps

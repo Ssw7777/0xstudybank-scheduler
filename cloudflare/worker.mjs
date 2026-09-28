@@ -136,6 +136,13 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
   }
   let snapshot = 'not_due';
   let rpc='disabled';
+  let web3='disabled';
+  if(env.WEB3_POLLING_ENABLED==='true' && manualSlot===undefined){
+    try{
+      const checked=await jsonRequest(`${SITE}/api/cron/web3-refresh`,{method:'POST',headers},55000);
+      web3=checked.ok===true?'accepted':'partial';
+    }catch(error){web3='failed';failures.push({stage:'web3',reason:String(error?.message??'web3_failed').slice(0,160)});}
+  }
   if(env.RPC_POLLING_ENABLED==='true' && manualSlot===undefined){
     try{
       const checked=await jsonRequest(`${SITE}/api/cron/rpc-refresh`,{method:'POST',headers},55000);
@@ -153,7 +160,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
     }, 55000);
     snapshot = result.ok && result.reason !== 'refresh_in_progress' ? 'accepted' : 'not_completed';
   }
-  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed' && walletDispatch !== 'failed' && !['failed','partial'].includes(rpc), rpc, walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', walletDispatch, slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
+  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed' && walletDispatch !== 'failed' && !['failed','partial'].includes(rpc) && !['failed','partial'].includes(web3), rpc, web3, walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', walletDispatch, slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
   console.log(JSON.stringify(result));
   return result;
 }
