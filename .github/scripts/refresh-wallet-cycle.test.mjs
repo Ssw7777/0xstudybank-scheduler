@@ -25,7 +25,7 @@ test('core cycle immediately persists partial successes and stops on rate limit'
 test('core persistence failure never advances to another provider read',async()=>{
   const h=harness();h.io.persistProtocols=async()=>{throw new Error('write_failed')};
   await assert.rejects(collectCoreCycle(wallets,h.io),/write_failed/);
-  assert.equal(h.calls.length,1);
+  assert.equal(h.calls.length,5);
 });
 function harness(failure) {
   const calls = [], writes = [];

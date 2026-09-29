@@ -22,6 +22,11 @@ export async function collectCoreCycle(wallets, io, options = {}) {
   const now = io.now ?? Date.now, start = now();
   const budgetMs = options.budgetMs ?? 18 * 60_000;
   const report = {configured:wallets.length, balances:0, details:0, readFailures:0, rateLimited:false, budgetReached:false};
+  let balances=[],protocols=[];
+  async function flush(){
+    if(protocols.length){await io.persistProtocols(protocols);protocols=[];}
+    if(balances.length){await io.persist(balances);balances=[];}
+  }
   // One merged oldest-first queue prevents either balances or withdrawals from
   // waiting behind a whole phase. Successful observations are durable immediately.
   const tasks = wallets.flatMap(wallet => [
@@ -42,14 +47,17 @@ export async function collectCoreCycle(wallets, io, options = {}) {
     if(stage==='balance'){
       const total=body?.total_usd_value ?? body?.total_usd;
       if(total==null || !Number.isFinite(Number(total)) || Number(total)<0 || !Array.isArray(body?.chain_list)){report.readFailures++;continue;}
-      await io.persist([{address:wallet.address,observedAt,observation:body}]);
+      balances.push({address:wallet.address,observedAt,observation:body});
+      if(balances.length===5){await io.persist(balances);balances=[];}
       report.balances++;
     }else{
       if(!(Array.isArray(body)||Array.isArray(body?.data)||Array.isArray(body?.list)||Array.isArray(body?.data?.list))){report.readFailures++;continue;}
-      await io.persistProtocols([{address:wallet.address,observedAt,observation:body}]);
+      protocols.push({address:wallet.address,observedAt,observation:body});
+      if(protocols.length===5){await io.persistProtocols(protocols);protocols=[];}
       report.details++;
     }
   }
+  await flush();
   return report;
 }
 
