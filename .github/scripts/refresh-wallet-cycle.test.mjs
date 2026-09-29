@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectCycle, oldestFirst, validateManifest } from './refresh-wallet-cycle.mjs';
+import { collectCycle, collectCoreCycle, oldestFirst, validateManifest } from './refresh-wallet-cycle.mjs';
 import { needsCooldown } from './provider-cooldown.mjs';
 
 const wallets = Array.from({ length: 25 }, (_, i) => ({
@@ -8,6 +8,25 @@ const wallets = Array.from({ length: 25 }, (_, i) => ({
   lastSuccessAt: new Date(1000 + i * 1000).toISOString(),
   needsProtocolRefresh: true, tokenUuids: ['eth:eth'], tokenChains: ['eth'],
 }));
+test('core cycle checks all totals and protocols, without redundant token API reads',async()=>{
+  const h=harness(),protocols=[];h.io.persistProtocols=async rows=>protocols.push(...rows);
+  const result=await collectCoreCycle(wallets,h.io);
+  assert.equal(result.balances,25);assert.equal(result.details,25);
+  assert.equal(h.calls.length,50);assert.equal(h.writes.length,25);assert.equal(protocols.length,25);
+  assert.ok(h.calls.every(c=>['balance','protocols'].includes(c.stage)));
+});
+test('core cycle immediately persists partial successes and stops on rate limit',async()=>{
+  const h=harness((stage,w,calls)=>calls.length===8),protocols=[];
+  h.io.persistProtocols=async rows=>protocols.push(...rows);
+  const result=await collectCoreCycle(wallets,h.io);
+  assert.equal(h.calls.length,8);assert.equal(result.rateLimited,true);
+  assert.equal(h.writes.length+protocols.length,7);
+});
+test('core persistence failure never advances to another provider read',async()=>{
+  const h=harness();h.io.persistProtocols=async()=>{throw new Error('write_failed')};
+  await assert.rejects(collectCoreCycle(wallets,h.io),/write_failed/);
+  assert.equal(h.calls.length,1);
+});
 function harness(failure) {
   const calls = [], writes = [];
   return { calls, writes, io: {

@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     # Includes the bounded collection budget and write retries; normal completion
     # does not wait for this limit.
-    timeout-minutes: 15
+    timeout-minutes: 23
     outputs:
       allowed: ${{ steps.cooldown.outputs.allowed }}
     permissions:
@@ -180,8 +180,8 @@ jobs:
           if (!Number.isInteger(status.snapshotCount) || status.snapshotCount < 1) failures.push("no portfolio snapshot exists");
           const count = Number(status.walletCount);
           if (!Number.isInteger(count) || count < 1 || count > 50) failures.push("invalid configured wallet count");
-          if (Number(status.walletsLive) !== count) failures.push(`only ${status.walletsLive}/${count} wallets are live`);
-          if (Number(status.walletsOver10min) !== 0) failures.push(`${status.walletsOver10min} wallets exceed 10 minutes`);
+          if (Number(status.walletsOver20min) !== 0) failures.push(`${status.walletsOver20min} wallets exceed the requested 20-minute limit`);
+          if (!Number.isFinite(status.oldestProtocolAgeSeconds) || status.oldestProtocolAgeSeconds > 1200) failures.push('protocol observations exceed 20 minutes');
           if (Number(status.appsFresh) !== count || Number(status.appsStale) !== 0) {
             failures.push(`only ${status.appsFresh}/${count} App audits are fresh`);
           }
@@ -209,7 +209,7 @@ jobs:
             for (const failure of failures) console.log(`::error title=Production freshness::${failure}.`);
             process.exit(1);
           }
-          console.log(`Freshness verified: snapshot current, ${count}/${count} wallet totals within ten minutes; App/protocol audits meet their separate checks.`);
+          console.log(`Freshness verified: snapshot current, ${count}/${count} wallet totals and protocol observations within the requested twenty-minute limit.`);
           console.log(tokenWarnings.length
             ? "Token audit remains incomplete; older quantities are explicitly flagged and their per-chain queue continues next round."
             : "Token audit verified: every configured wallet is fresh, with no invalid rows, duplicate rows, or aggregation mismatches.");

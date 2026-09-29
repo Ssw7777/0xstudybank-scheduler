@@ -17,6 +17,42 @@ export function validateManifest(body) {
   return body.wallets.map((w, i) => ({ ...w, address: addresses[i] }));
 }
 
+/** Core valuations only. RPC/OKX already own token quantity and discovery work. */
+export async function collectCoreCycle(wallets, io, options = {}) {
+  const now = io.now ?? Date.now, start = now();
+  const budgetMs = options.budgetMs ?? 18 * 60_000;
+  const report = {configured:wallets.length, balances:0, details:0, readFailures:0, rateLimited:false, budgetReached:false};
+  // One merged oldest-first queue prevents either balances or withdrawals from
+  // waiting behind a whole phase. Successful observations are durable immediately.
+  const tasks = wallets.flatMap(wallet => [
+    {stage:'balance', wallet, at:timestamp(wallet.lastSuccessAt)},
+    {stage:'protocols', wallet, at:timestamp(wallet.protocolUpdatedAt)},
+  ]).sort((a,b) => a.at-b.at || Number(a.stage==='protocols')-Number(b.stage==='protocols'));
+  for (const {stage,wallet} of tasks) {
+    if(now()-start >= budgetMs){report.budgetReached=true;break;}
+    let result;
+    try { result=await io.read(stage,wallet); }
+    catch(error){
+      report.readFailures++;
+      io.log?.(`${stage}: HTTP ${error?.status ?? 'network'}; confirmed data retained.`);
+      if(error?.status===429){report.rateLimited=true;break;}
+      continue;
+    }
+    const observedAt=new Date(now()).toISOString(), body=result?.body;
+    if(stage==='balance'){
+      const total=body?.total_usd_value ?? body?.total_usd;
+      if(total==null || !Number.isFinite(Number(total)) || Number(total)<0 || !Array.isArray(body?.chain_list)){report.readFailures++;continue;}
+      await io.persist([{address:wallet.address,observedAt,observation:body}]);
+      report.balances++;
+    }else{
+      if(!(Array.isArray(body)||Array.isArray(body?.data)||Array.isArray(body?.list)||Array.isArray(body?.data?.list))){report.readFailures++;continue;}
+      await io.persistProtocols([{address:wallet.address,observedAt,observation:body}]);
+      report.details++;
+    }
+  }
+  return report;
+}
+
 // Dependency injection makes starvation, partial persistence and 429 handling
 // testable without spending provider quota or writing production observations.
 export async function collectCycle(wallets, io, options = {}) {
@@ -180,7 +216,7 @@ async function main() {
   }
   const wallets = validateManifest(await site(env.TARGETS_URL));
   const endpoints = { balance: env.RABBY_TOTAL_URL, tokens: env.RABBY_SPECIFIC_TOKEN_URL, protocols: env.RABBY_PROTOCOL_URL, discovery: env.RABBY_TOKEN_URL };
-  const report = await collectCycle(wallets, {
+  const report = await collectCoreCycle(wallets, {
     log: text => console.log(text),
     persistProtocols: async observations => {
       await site(new URL('/api/cron/protocol-observation',env.OBSERVATION_URL).href,{observations},`${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-protocol-${sequence++}`);
@@ -192,6 +228,9 @@ async function main() {
     },
     read: async (stage, wallet, extra) => {
       await pause(Math.max(0, nextProviderAt - Date.now()));
+      // Smooth one fixed runner, not bursts followed by repeated cooldowns.
+      // Fifty core reads take ~17 minutes at this bounded start-to-start pace.
+      nextProviderAt = Date.now() + 20_000;
       try {
         const url = new URL(endpoints[stage]);
         if (stage !== 'tokens') url.searchParams.set('id', wallet.address);
@@ -212,16 +251,15 @@ async function main() {
         console.log(JSON.stringify({provider:'rabby',stage,status:response.status,request:providerRequests,elapsedSeconds:Math.round((Date.now()-providerStartedAt)/1000),quota}));
         if (!response.ok) { await response.body?.cancel(); throw Object.assign(new Error('provider_request_failed'), { status: response.status }); }
         return { body: await response.json() };
-      // Production returned 429 on request eleven within one minute at 5s.
-      // Eight seconds between completions reduces pressure below that observed
-      // ceiling; it is not a claim that the public API guarantees this quota.
-      } finally { nextProviderAt = Date.now() + 8000; }
+      } finally { /* Provider 429 stops the entire cycle, with no IP/key rotation. */ }
     },
   }, { rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),protocolWalletId:env.PROTOCOL_WALLET_ID });
   console.log(JSON.stringify(report));
   if (report.rateLimited) { console.log('::error::Provider HTTP 429; stopped all further provider requests. No runner retry.'); process.exitCode = 75; }
   else if (report.balances !== wallets.length) { console.log('::error::Incomplete wallet totals; oldest wallets remain first next cycle.'); process.exitCode = 1; }
-  else if (report.budgetReached || report.readFailures) console.log('::warning::Totals persisted; detail audit is incomplete.');
+  else if (report.details !== wallets.length || report.budgetReached || report.readFailures) {
+    console.log('::error::Core protocol audit incomplete; not claiming a complete refresh.');process.exitCode=1;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
