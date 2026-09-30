@@ -1,12 +1,9 @@
 name: Production data refresh
 
 on:
-  schedule:
-    # Wallet/Rabby round every ten minutes.
-    - cron: "3,13,23,33,43,53 * * * *"
-    # Interleaved CEX + portfolio snapshot round. Together both schedules keep
-    # fast data on a five-minute cadence without doubling Rabby traffic.
-    - cron: "8,18,28,38,48,58 * * * *"
+  # Cloudflare is the one-minute cloud clock. It dispatches this workflow only
+  # when wallet totals are due; its own five-minute CEX lane records snapshots.
+  # A second GitHub schedule duplicated CEX work and burned Vercel Hobby CPU.
   workflow_dispatch:
     inputs:
       wallet_only:

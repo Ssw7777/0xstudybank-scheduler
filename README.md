@@ -6,6 +6,16 @@ dashboard credentials, or application source code.
 
 ## Current state (2026-09-29)
 
+**2026-09-30 hosting incident:** Vercel returns HTTP 402 `DEPLOYMENT_DISABLED`
+for the production app. The Hobby team's `softBlock.reason` is
+`FAIR_USE_LIMITS_EXCEEDED`, metric `fluidCpuDuration`. This is a platform block,
+not a failed build or a missing wallet token. The redundant GitHub cron schedules
+were removed to avoid another five-minute CEX refresh running alongside the
+Cloudflare five-minute lane when service resumes. Cloudflare's conditional
+`workflow_dispatch` remains in place for wallet totals. The existing 10–20 minute
+full-wallet acceptance has **not** passed, and no scheduler can refresh the
+dashboard while its production deployment is blocked.
+
 Cloudflare's existing one-minute cron now also calls the dashboard's independent
 RPC quantity audit and OKX OnchainOS read-only observation routes. Wallet addresses
 and provider credentials remain in the private dashboard, not this repository.
