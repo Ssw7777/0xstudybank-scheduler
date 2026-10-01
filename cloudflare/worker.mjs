@@ -1,4 +1,4 @@
-const SITE = 'https://0xstudybank.vercel.app';
+const SITE = 'https://0xstudybank-six.vercel.app';
 const RABBY = 'https://api.rabby.io/v1/user';
 const WORKFLOW = 'https://api.github.com/repos/Ssw7777/0xstudybank-scheduler/actions/workflows/production-refresh.yml';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));

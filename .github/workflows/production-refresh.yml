@@ -22,11 +22,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  OIDC_AUDIENCE: https://0xstudybank.vercel.app
-  FAST_URL: https://0xstudybank.vercel.app/api/cron/refresh?mode=fast
-  TARGETS_URL: https://0xstudybank.vercel.app/api/cron/wallet-targets
-  OBSERVATION_URL: https://0xstudybank.vercel.app/api/cron/wallet-observation
-  STATUS_URL: https://0xstudybank.vercel.app/api/status
+  OIDC_AUDIENCE: https://0xstudybank-six.vercel.app
+  FAST_URL: https://0xstudybank-six.vercel.app/api/cron/refresh?mode=fast
+  TARGETS_URL: https://0xstudybank-six.vercel.app/api/cron/wallet-targets
+  OBSERVATION_URL: https://0xstudybank-six.vercel.app/api/cron/wallet-observation
+  STATUS_URL: https://0xstudybank-six.vercel.app/api/status
   RABBY_TOTAL_URL: https://api.rabby.io/v1/user/total_balance
   RABBY_PROTOCOL_URL: https://api.rabby.io/v1/user/complex_protocol_list
   RABBY_TOKEN_URL: https://api.rabby.io/v1/user/token_list
