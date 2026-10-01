@@ -155,7 +155,7 @@ test('scheduled backup respects the same cooldown as Cloudflare; skipped success
   const failed = {id:1,conclusion:'failure',updated_at:new Date(now - 60_000).toISOString()};
   const skipped = {id:2,conclusion:'success',updated_at:new Date(now).toISOString()};
   assert.equal(needsCooldown([failed,skipped],3,now),true);
-  assert.equal(needsCooldown([failed,skipped],3,now+180_001),false);
+  assert.equal(needsCooldown([failed,skipped],3,now+90_001),false);
   assert.equal(needsCooldown([failed],1,now),false);
 });
 

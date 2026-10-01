@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 
 export function needsCooldown(runs, currentId, now = Date.now()) {
   return runs.some(run => String(run.id) !== String(currentId) && run.conclusion === 'failure' &&
-    Number.isFinite(Date.parse(run.updated_at)) && now - Date.parse(run.updated_at) < 180_000);
+    Number.isFinite(Date.parse(run.updated_at)) && now - Date.parse(run.updated_at) < 90_000);
 }
 
 async function main() {

@@ -22,8 +22,8 @@ export async function collectCoreCycle(wallets, io, options = {}) {
   const now = io.now ?? Date.now, start = now();
   const budgetMs = options.budgetMs ?? 18 * 60_000;
   const freshMs = options.freshMs ?? 8 * 60_000;
-  const maxBalances = options.maxBalances ?? 8;
-  const maxProtocols = options.maxProtocols ?? 8;
+  const maxBalances = options.maxBalances ?? 5;
+  const maxProtocols = options.maxProtocols ?? 5;
   const report = {
     configured: wallets.length,
     dueBalances: 0,
@@ -273,7 +273,7 @@ async function main() {
       await pause(Math.max(0, nextProviderAt - Date.now()));
       // Smooth one fixed runner; 25s start-to-start keeps Rabby under the public limit.
       // Capped 8+8 reads take ~7 minutes; CF re-dispatches for the next stale slice.
-      nextProviderAt = Date.now() + 25_000;
+      nextProviderAt = Date.now() + 30_000;
       try {
         const url = new URL(endpoints[stage]);
         if (stage !== 'tokens') url.searchParams.set('id', wallet.address);
@@ -299,9 +299,9 @@ async function main() {
   }, {
     rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),
     protocolWalletId: env.PROTOCOL_WALLET_ID,
-    freshMs: 8 * 60_000,
-    maxBalances: 8,
-    maxProtocols: 8,
+    freshMs: 6 * 60_000,
+    maxBalances: 5,
+    maxProtocols: 5,
     budgetMs: 16 * 60_000,
   });
   console.log(JSON.stringify(report));

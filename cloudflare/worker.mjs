@@ -26,8 +26,8 @@ export async function dispatchWalletWorkflow(env, now = Date.now(), request = fe
   if (!Array.isArray(body.workflow_runs)) throw new Error('invalid_workflow_runs');
   // Keep one existing runner workflow, never rotate runners to evade a rate limit.
   if (body.workflow_runs.some(run => ['queued','in_progress','waiting','pending','requested'].includes(run.status))) return 'already_running';
-  if (body.workflow_runs.some(run => run.conclusion === 'failure' && now - Date.parse(run.updated_at) < 3 * 60000)) return 'failure_cooldown';
-  if (body.workflow_runs.some(run => now - Date.parse(run.created_at) < 2 * 60000)) return 'recently_started';
+  if (body.workflow_runs.some(run => run.conclusion === 'failure' && now - Date.parse(run.updated_at) < 90_000)) return 'failure_cooldown';
+  if (body.workflow_runs.some(run => now - Date.parse(run.created_at) < 75_000)) return 'recently_started';
   const dispatched = await request(`${WORKFLOW}/dispatches`, {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref: 'main', inputs: { wallet_only: 'true' } }),
@@ -151,6 +151,36 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
       rpc=checked.ok===true?(checked.chains?.some(c=>c.failed>0)?'partial':'accepted'):'failed';
     }catch(error){rpc='failed';failures.push({stage:'rpc',reason:String(error?.message??'rpc_failed').slice(0,160)});}
   }
+  let walletBatch = 'not_due';
+  // High-frequency site batches while stale: budget=1, oldest-first, calibrate-first on app.
+  // Does not call Rabby from the Worker; Vercel uses OKX/Zerion then Rabby.
+  if (manualSlot === undefined) {
+    try {
+      const statusResponse = await fetch(`${SITE}/api/status`, {
+        headers: { Authorization: `Bearer ${env.CRON_SECRET}` }, redirect: 'manual', signal: AbortSignal.timeout(15000),
+      });
+      if (statusResponse.ok) {
+        const status = await statusResponse.json();
+        const over20 = Number(status.walletsOver20min || 0);
+        const oldest = status.oldestWalletAgeSeconds;
+        if (over20 > 0 || (oldest !== null && oldest > 600)) {
+          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=1&staleMinutes=6`, {
+            method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-wb-${minute}-${execution}` },
+          }, 55000);
+          walletBatch = result.ok && result.reason !== 'refresh_in_progress'
+            ? (Number(result.batchSucceeded || 0) > 0 ? 'accepted' : 'empty')
+            : 'not_completed';
+        } else {
+          walletBatch = 'data_current';
+        }
+      } else {
+        walletBatch = `status_http_${statusResponse.status}`;
+      }
+    } catch (error) {
+      walletBatch = 'failed';
+      failures.push({ stage: 'wallet-batch', reason: String(error?.message ?? 'wallet_batch_failed').slice(0, 160) });
+    }
+  }
   let walletDispatch = 'not_due';
   if (manualSlot === undefined) {
     try { walletDispatch = await dispatchWalletWorkflow(env, scheduledTime); }
@@ -162,7 +192,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
     }, 55000);
     snapshot = result.ok && result.reason !== 'refresh_in_progress' ? 'accepted' : 'not_completed';
   }
-  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed' && walletDispatch !== 'failed' && !['failed','partial'].includes(rpc) && !['failed','partial'].includes(web3), rpc, web3, walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', walletDispatch, slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
+  const result = { ok: failed === 0 && protocolFailed === 0 && deferred === 0 && snapshot !== 'not_completed' && walletDispatch !== 'failed' && walletBatch !== 'failed' && !['failed','partial'].includes(rpc) && !['failed','partial'].includes(web3), rpc, web3, walletPolling: walletPolling ? 'enabled' : 'paused_provider_rate_limit', walletBatch, walletDispatch, slot, targeted: wallets.length, updated: observations.length, failed, protocolFailed, deferred, snapshot, failures };
   console.log(JSON.stringify(result));
   return result;
 }

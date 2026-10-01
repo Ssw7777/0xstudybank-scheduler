@@ -71,19 +71,23 @@ test('paused wallet polling does not call the public provider but still takes sc
   const original = globalThis.fetch;
   const paths = [];
   globalThis.fetch = async url => {
-    paths.push(url);
-    assert.equal(url, 'https://0xstudybank-six.vercel.app/api/cron/refresh?mode=fast');
+    paths.push(String(url));
+    if (String(url).endsWith('/api/status')) {
+      return Response.json({ walletsOver20min: 0, oldestWalletAgeSeconds: 100, oldestProtocolAgeSeconds: 100 });
+    }
+    assert.ok(String(url).includes('mode=fast'));
     return Response.json({ ok: true, ran: 'fast' });
   };
   try {
     const env = { CRON_SECRET: 'test-only', WALLET_POLLING_ENABLED: 'false' };
     const idle = await runCycle(env, 60000);
     assert.equal(idle.walletPolling, 'paused_provider_rate_limit');
-    assert.equal(paths.length, 0);
+    assert.equal(idle.walletBatch, 'data_current');
+    assert.ok(paths.every(p => p.includes('/api/status')));
     const due = await runCycle(env, 300000);
     assert.equal(due.snapshot, 'accepted');
     assert.equal(due.updated, 0);
-    assert.equal(paths.length, 1);
+    assert.ok(paths.some(p => p.includes('mode=fast')));
     await assert.rejects(runCycle(env, 300000, 0), /paused/);
   } finally {
     globalThis.fetch = original;
@@ -110,22 +114,31 @@ test('cloud trigger dispatches stale wallets once using only the existing workfl
 
 test('RPC quantity lane runs independently while public wallet polling is paused',async()=>{
   const original=globalThis.fetch,paths=[];
-  globalThis.fetch=async(url)=>{paths.push(url);return Response.json({ok:true,chains:[{chain:'eth',failed:0}]});};
+  globalThis.fetch=async(url)=>{
+    paths.push(String(url));
+    if(String(url).endsWith('/api/status')) return Response.json({walletsOver20min:0,oldestWalletAgeSeconds:100,oldestProtocolAgeSeconds:100});
+    return Response.json({ok:true,chains:[{chain:'eth',failed:0}]});
+  };
   try{
     const result=await runCycle({CRON_SECRET:'test',WALLET_POLLING_ENABLED:'false',RPC_POLLING_ENABLED:'true'},60000);
-    assert.equal(result.rpc,'accepted');assert.deepEqual(paths,['https://0xstudybank-six.vercel.app/api/cron/rpc-refresh']);
+    assert.equal(result.rpc,'accepted');
+    assert.equal(result.walletBatch,'data_current');
+    assert.deepEqual(paths.filter(p=>p.includes('rpc-refresh')),['https://0xstudybank-six.vercel.app/api/cron/rpc-refresh']);
   }finally{globalThis.fetch=original;}
 });
 
 test('Web3 lane is cloud-triggered without wallet addresses or keys in worker, independent of Rabby',async()=>{
   const original=globalThis.fetch,paths=[];
   globalThis.fetch=async(url,options)=>{
-    paths.push(url);assert.equal(options.headers.Authorization,'Bearer test');
+    paths.push(String(url));assert.equal(options.headers.Authorization,'Bearer test');
+    if(String(url).endsWith('/api/status')) return Response.json({walletsOver20min:0,oldestWalletAgeSeconds:100,oldestProtocolAgeSeconds:100});
     return Response.json({ok:true,ran:'web3-observations',updated:5});
   };
   try{
     const result=await runCycle({CRON_SECRET:'test',WALLET_POLLING_ENABLED:'false',WEB3_POLLING_ENABLED:'true'},60000);
-    assert.equal(result.web3,'accepted');assert.deepEqual(paths,['https://0xstudybank-six.vercel.app/api/cron/web3-refresh']);
+    assert.equal(result.web3,'accepted');
+    assert.equal(result.walletBatch,'data_current');
+    assert.deepEqual(paths.filter(p=>p.includes('web3-refresh')),['https://0xstudybank-six.vercel.app/api/cron/web3-refresh']);
   }finally{globalThis.fetch=original;}
 });
 
