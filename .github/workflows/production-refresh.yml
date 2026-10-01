@@ -202,9 +202,19 @@ jobs:
             if (audit.healthy !== true && tokenWarnings.length === 0) tokenWarnings.push("token audit is not healthy");
           }
           for (const warning of tokenWarnings) console.log(`::warning title=Token quantity audit::${warning}.`);
+          // Soft-verify: unmet freshness is a warning so partial Rabby slices can
+          // re-dispatch without a failure cooldown. Endpoint/auth errors still fail.
+          const hard = failures.filter(f =>
+            f.includes('status endpoint') || f.includes('invalid configured') || f.includes('wallet manifest') || f.includes('no portfolio snapshot')
+          );
+          for (const failure of failures) {
+            const title = hard.includes(failure) ? 'Production freshness' : 'Freshness remaining';
+            console.log(`::${hard.includes(failure) ? 'error' : 'warning'} title=${title}::${failure}.`);
+          }
+          if (hard.length) process.exit(1);
           if (failures.length) {
-            for (const failure of failures) console.log(`::error title=Production freshness::${failure}.`);
-            process.exit(1);
+            console.log(`Partial freshness: walletsOver20min=${status.walletsOver20min}; next capped cycle will continue.`);
+            process.exit(0);
           }
           console.log(`Freshness verified: snapshot current, ${count}/${count} wallet totals and protocol observations within the requested twenty-minute limit.`);
           console.log(tokenWarnings.length

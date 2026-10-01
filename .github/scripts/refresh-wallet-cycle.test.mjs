@@ -10,7 +10,8 @@ const wallets = Array.from({ length: 25 }, (_, i) => ({
 }));
 test('core cycle checks all totals and protocols, without redundant token API reads',async()=>{
   const h=harness(),protocols=[];h.io.persistProtocols=async rows=>protocols.push(...rows);
-  const result=await collectCoreCycle(wallets,h.io);
+  // Uncapped for this unit test so we still prove interleaving + full coverage.
+  const result=await collectCoreCycle(wallets,h.io,{maxBalances:25,maxProtocols:25,freshMs:0});
   assert.equal(result.balances,25);assert.equal(result.details,25);
   assert.equal(h.calls.length,50);assert.equal(h.writes.length,25);assert.equal(protocols.length,25);
   assert.ok(h.calls.every(c=>['balance','protocols'].includes(c.stage)));
@@ -18,15 +19,36 @@ test('core cycle checks all totals and protocols, without redundant token API re
 test('core cycle immediately persists partial successes and stops on rate limit',async()=>{
   const h=harness((stage,w,calls)=>calls.length===8),protocols=[];
   h.io.persistProtocols=async rows=>protocols.push(...rows);
-  const result=await collectCoreCycle(wallets,h.io);
+  const result=await collectCoreCycle(wallets,h.io,{maxBalances:25,maxProtocols:25,freshMs:0});
   assert.equal(h.calls.length,8);assert.equal(result.rateLimited,true);
   assert.equal(h.writes.length+protocols.length,7);
 });
 test('core persistence failure never advances to another provider read',async()=>{
   const h=harness();h.io.persistProtocols=async()=>{throw new Error('write_failed')};
-  await assert.rejects(collectCoreCycle(wallets,h.io),/write_failed/);
-  assert.equal(h.calls.length,5);
+  await assert.rejects(collectCoreCycle(wallets,h.io,{maxBalances:25,maxProtocols:25,freshMs:0}),/write_failed/);
+  // Interleaved balance+protocol: five protocol rows flush after ten provider reads.
+  assert.equal(h.calls.length,10);
 });
+test('core cycle skips fresh wallets and respects per-run caps', async () => {
+  const now = 1_000_000;
+  const mixed = wallets.map((w, i) => ({
+    ...w,
+    lastSuccessAt: i < 10 ? new Date(now - 60_000).toISOString() : new Date(now - 20 * 60_000).toISOString(),
+    protocolUpdatedAt: i < 10 ? new Date(now - 60_000).toISOString() : new Date(now - 20 * 60_000).toISOString(),
+    needsProtocolRefresh: i >= 10,
+  }));
+  const h = harness();
+  h.io.now = () => now;
+  const protocols = [];
+  h.io.persistProtocols = async rows => protocols.push(...rows);
+  const result = await collectCoreCycle(mixed, h.io, { maxBalances: 8, maxProtocols: 8, freshMs: 8 * 60_000 });
+  assert.equal(result.dueBalances, 15);
+  assert.equal(result.dueProtocols, 15);
+  assert.equal(result.balances, 8);
+  assert.equal(result.details, 8);
+  assert.ok(h.calls.length <= 16);
+});
+
 function harness(failure) {
   const calls = [], writes = [];
   return { calls, writes, io: {
@@ -130,10 +152,10 @@ test('protocol backlog cannot consume every discovery slot', async () => {
 });
 test('scheduled backup respects the same cooldown as Cloudflare; skipped success does not extend it', () => {
   const now = 1_000_000;
-  const failed = {id:1,conclusion:'failure',updated_at:new Date(now - 300_000).toISOString()};
+  const failed = {id:1,conclusion:'failure',updated_at:new Date(now - 60_000).toISOString()};
   const skipped = {id:2,conclusion:'success',updated_at:new Date(now).toISOString()};
   assert.equal(needsCooldown([failed,skipped],3,now),true);
-  assert.equal(needsCooldown([failed,skipped],3,now+300_001),false);
+  assert.equal(needsCooldown([failed,skipped],3,now+180_001),false);
   assert.equal(needsCooldown([failed],1,now),false);
 });
 

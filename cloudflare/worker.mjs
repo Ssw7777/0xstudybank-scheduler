@@ -15,8 +15,10 @@ export async function dispatchWalletWorkflow(env, now = Date.now(), request = fe
   });
   if (!statusResponse.ok) throw new Error(`scheduler_status_http_${statusResponse.status}`);
   const status = await statusResponse.json();
-  if (status.oldestWalletAgeSeconds !== null && status.oldestWalletAgeSeconds < 300 &&
-      status.oldestProtocolAgeSeconds !== null && status.oldestProtocolAgeSeconds < 480) return 'data_current';
+  // Keep dispatching until wallet totals and protocols are inside the 20-minute goal.
+  if (status.oldestWalletAgeSeconds !== null && status.oldestWalletAgeSeconds < 480 &&
+      status.oldestProtocolAgeSeconds !== null && status.oldestProtocolAgeSeconds < 600 &&
+      Number(status.walletsOver20min || 0) === 0) return 'data_current';
   const headers = { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'studybank-cloud-scheduler', 'X-GitHub-Api-Version': '2022-11-28' };
   const response = await request(`${WORKFLOW}/runs?per_page=10`, { headers, redirect: 'manual', signal: AbortSignal.timeout(20000) });
   if (!response.ok) throw new Error(`github_runs_http_${response.status}`);
@@ -24,8 +26,8 @@ export async function dispatchWalletWorkflow(env, now = Date.now(), request = fe
   if (!Array.isArray(body.workflow_runs)) throw new Error('invalid_workflow_runs');
   // Keep one existing runner workflow, never rotate runners to evade a rate limit.
   if (body.workflow_runs.some(run => ['queued','in_progress','waiting','pending','requested'].includes(run.status))) return 'already_running';
-  if (body.workflow_runs.some(run => run.conclusion === 'failure' && now - Date.parse(run.updated_at) < 10 * 60000)) return 'failure_cooldown';
-  if (body.workflow_runs.some(run => now - Date.parse(run.created_at) < 5 * 60000)) return 'recently_started';
+  if (body.workflow_runs.some(run => run.conclusion === 'failure' && now - Date.parse(run.updated_at) < 3 * 60000)) return 'failure_cooldown';
+  if (body.workflow_runs.some(run => now - Date.parse(run.created_at) < 2 * 60000)) return 'recently_started';
   const dispatched = await request(`${WORKFLOW}/dispatches`, {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref: 'main', inputs: { wallet_only: 'true' } }),

@@ -21,18 +21,53 @@ export function validateManifest(body) {
 export async function collectCoreCycle(wallets, io, options = {}) {
   const now = io.now ?? Date.now, start = now();
   const budgetMs = options.budgetMs ?? 18 * 60_000;
-  const report = {configured:wallets.length, balances:0, details:0, readFailures:0, rateLimited:false, budgetReached:false};
+  const freshMs = options.freshMs ?? 8 * 60_000;
+  const maxBalances = options.maxBalances ?? 8;
+  const maxProtocols = options.maxProtocols ?? 8;
+  const report = {
+    configured: wallets.length,
+    dueBalances: 0,
+    dueProtocols: 0,
+    balanceCap: maxBalances,
+    protocolCap: maxProtocols,
+    balances: 0,
+    details: 0,
+    readFailures: 0,
+    rateLimited: false,
+    budgetReached: false,
+  };
   let balances=[],protocols=[];
   async function flush(){
     if(protocols.length){await io.persistProtocols(protocols);protocols=[];}
     if(balances.length){await io.persist(balances);balances=[];}
   }
-  // One merged oldest-first queue prevents either balances or withdrawals from
-  // waiting behind a whole phase. Successful observations are durable immediately.
-  const tasks = wallets.flatMap(wallet => [
-    {stage:'balance', wallet, at:timestamp(wallet.lastSuccessAt)},
-    {stage:'protocols', wallet, at:timestamp(wallet.protocolUpdatedAt)},
-  ]).sort((a,b) => a.at-b.at || Number(a.stage==='protocols')-Number(b.stage==='protocols'));
+  // Skip recently successful totals; cap each stage so one run cannot burn Rabby.
+  const balanceDue = wallets
+    .filter(wallet => {
+      const at = timestamp(wallet.lastSuccessAt);
+      return !at || now() - at >= freshMs;
+    })
+    .map(wallet => ({ stage: 'balance', wallet, at: timestamp(wallet.lastSuccessAt) }))
+    .sort((a, b) => a.at - b.at);
+  const protocolDue = wallets
+    .filter(wallet => {
+      if (wallet.needsProtocolRefresh === false) return false;
+      if (wallet.needsProtocolRefresh === true) return true;
+      const at = timestamp(wallet.protocolUpdatedAt);
+      return !at || now() - at >= freshMs;
+    })
+    .map(wallet => ({ stage: 'protocols', wallet, at: timestamp(wallet.protocolUpdatedAt) }))
+    .sort((a, b) => a.at - b.at);
+  report.dueBalances = balanceDue.length;
+  report.dueProtocols = protocolDue.length;
+  // Interleave capped oldest-first work so neither stage starves the other.
+  const tasks = [];
+  const bal = balanceDue.slice(0, maxBalances);
+  const proto = protocolDue.slice(0, maxProtocols);
+  for (let i = 0; i < Math.max(bal.length, proto.length); i++) {
+    if (bal[i]) tasks.push(bal[i]);
+    if (proto[i]) tasks.push(proto[i]);
+  }
   for (const {stage,wallet} of tasks) {
     if(now()-start >= budgetMs){report.budgetReached=true;break;}
     let result;
@@ -236,9 +271,9 @@ async function main() {
     },
     read: async (stage, wallet, extra) => {
       await pause(Math.max(0, nextProviderAt - Date.now()));
-      // Smooth one fixed runner, not bursts followed by repeated cooldowns.
-      // Fifty core reads take ~17 minutes at this bounded start-to-start pace.
-      nextProviderAt = Date.now() + 20_000;
+      // Smooth one fixed runner; 25s start-to-start keeps Rabby under the public limit.
+      // Capped 8+8 reads take ~7 minutes; CF re-dispatches for the next stale slice.
+      nextProviderAt = Date.now() + 25_000;
       try {
         const url = new URL(endpoints[stage]);
         if (stage !== 'tokens') url.searchParams.set('id', wallet.address);
@@ -261,12 +296,33 @@ async function main() {
         return { body: await response.json() };
       } finally { /* Provider 429 stops the entire cycle, with no IP/key rotation. */ }
     },
-  }, { rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),protocolWalletId:env.PROTOCOL_WALLET_ID });
+  }, {
+    rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),
+    protocolWalletId: env.PROTOCOL_WALLET_ID,
+    freshMs: 8 * 60_000,
+    maxBalances: 8,
+    maxProtocols: 8,
+    budgetMs: 16 * 60_000,
+  });
   console.log(JSON.stringify(report));
-  if (report.rateLimited) { console.log('::error::Provider HTTP 429; stopped all further provider requests. No runner retry.'); process.exitCode = 75; }
-  else if (report.balances !== wallets.length) { console.log('::error::Incomplete wallet totals; oldest wallets remain first next cycle.'); process.exitCode = 1; }
-  else if (report.details !== wallets.length || report.budgetReached || report.readFailures) {
-    console.log('::error::Core protocol audit incomplete; not claiming a complete refresh.');process.exitCode=1;
+  const progressed = report.balances + report.details > 0;
+  const balanceTarget = Math.min(report.dueBalances, report.balanceCap);
+  const protocolTarget = Math.min(report.dueProtocols, report.protocolCap);
+  // Soft success on partial progress so CF can re-dispatch the next stale slice soon.
+  // Hard-fail only when Rabby 429s with zero durable writes (triggers short cooldown).
+  if (report.rateLimited && !progressed) {
+    console.log('::error::Provider HTTP 429 before any durable write; short cooldown applies.');
+    process.exitCode = 75;
+  } else if (report.rateLimited) {
+    console.log(`::warning::Provider HTTP 429 after ${report.balances} totals / ${report.details} protocols; partial progress kept.`);
+  } else if (balanceTarget > 0 && report.balances < balanceTarget && !report.budgetReached) {
+    console.log(`::warning::Partial wallet totals ${report.balances}/${balanceTarget}; oldest remain first next cycle.`);
+  } else if (protocolTarget > 0 && report.details < protocolTarget && !report.budgetReached) {
+    console.log(`::warning::Partial protocol audit ${report.details}/${protocolTarget}; continuing next cycle.`);
+  } else if (report.dueBalances > report.balanceCap || report.dueProtocols > report.protocolCap) {
+    console.log(`::notice::Capped cycle complete (${report.balances} totals, ${report.details} protocols); more due wallets remain for later runs.`);
+  } else {
+    console.log(`Core cycle slice complete: ${report.balances} totals, ${report.details} protocols.`);
   }
 }
 
