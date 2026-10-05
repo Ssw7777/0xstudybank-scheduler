@@ -309,10 +309,13 @@ async function main() {
   const balanceTarget = Math.min(report.dueBalances, report.balanceCap);
   const protocolTarget = Math.min(report.dueProtocols, report.protocolCap);
   // Soft success on partial progress so CF can re-dispatch the next stale slice soon.
-  // Hard-fail only when Rabby 429s with zero durable writes (triggers short cooldown).
+  // Rabby 429 with zero durable writes: wait out a short cooldown, then end quietly.
   if (report.rateLimited && !progressed) {
-    console.log('::error::Provider HTTP 429 before any durable write; short cooldown applies.');
-    process.exitCode = 75;
+    // Hold the runner for the cooldown instead of failing the run: the Cloudflare
+    // clock never dispatches while a run is in progress, so the cooldown still
+    // holds, but a routine 429 no longer marks the run failed or emails anyone.
+    console.log('::warning::Provider HTTP 429 before any durable write; holding a 90s cooldown, then skipping this round.');
+    await new Promise(resolve => setTimeout(resolve, 90_000));
   } else if (report.rateLimited) {
     console.log(`::warning::Provider HTTP 429 after ${report.balances} totals / ${report.details} protocols; partial progress kept.`);
   } else if (balanceTarget > 0 && report.balances < balanceTarget && !report.budgetReached) {
