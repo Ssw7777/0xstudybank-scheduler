@@ -121,7 +121,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - name: Require all 25 wallets to be fresh
+      - name: Require active wallets within five-minute totals
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -177,8 +177,13 @@ jobs:
           if (!Number.isInteger(status.snapshotCount) || status.snapshotCount < 1) failures.push("no portfolio snapshot exists");
           const count = Number(status.walletCount);
           if (!Number.isInteger(count) || count < 1 || count > 50) failures.push("invalid configured wallet count");
-          if (Number(status.walletsOver20min) !== 0) failures.push(`${status.walletsOver20min} wallets exceed the requested 20-minute limit`);
-          if (!Number.isFinite(status.oldestProtocolAgeSeconds) || status.oldestProtocolAgeSeconds > 1200) failures.push('protocol observations exceed 20 minutes');
+          const over5 = Number(status.walletsOver5min ?? status.walletsOver20min ?? 0);
+          if (over5 !== 0) failures.push(`${over5} wallets exceed the requested 5-minute limit`);
+          if (!Number.isFinite(status.oldestWalletAgeSeconds) || status.oldestWalletAgeSeconds > 300) {
+            failures.push(`oldest wallet total is ${status.oldestWalletAgeSeconds ?? "unknown"} seconds old`);
+          }
+          // DeFi/protocol lane is softer: Rabby complex_protocol_list cannot sustain ≤5m for 15 wallets.
+          if (!Number.isFinite(status.oldestProtocolAgeSeconds) || status.oldestProtocolAgeSeconds > 600) failures.push('protocol observations exceed 10 minutes');
           if (Number(status.appsFresh) !== count || Number(status.appsStale) !== 0) {
             failures.push(`only ${status.appsFresh}/${count} App audits are fresh`);
           }
@@ -213,10 +218,10 @@ jobs:
           }
           if (hard.length) process.exit(1);
           if (failures.length) {
-            console.log(`Partial freshness: walletsOver20min=${status.walletsOver20min}; next capped cycle will continue.`);
+            console.log(`Partial freshness: walletsOver5min=${status.walletsOver5min ?? status.walletsOver20min}; oldestWallet=${status.oldestWalletAgeSeconds}s; next capped cycle will continue.`);
             process.exit(0);
           }
-          console.log(`Freshness verified: snapshot current, ${count}/${count} wallet totals and protocol observations within the requested twenty-minute limit.`);
+          console.log(`Freshness verified: snapshot current, ${count}/${count} wallet totals within the requested five-minute limit.`);
           console.log(tokenWarnings.length
             ? "Token audit remains incomplete; older quantities are explicitly flagged and their per-chain queue continues next round."
             : "Token audit verified: every configured wallet is fresh, with no invalid rows, duplicate rows, or aggregation mismatches.");

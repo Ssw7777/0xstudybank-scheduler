@@ -21,7 +21,7 @@ export function validateManifest(body) {
 export async function collectCoreCycle(wallets, io, options = {}) {
   const now = io.now ?? Date.now, start = now();
   const budgetMs = options.budgetMs ?? 18 * 60_000;
-  const freshMs = options.freshMs ?? 8 * 60_000;
+  const freshMs = options.freshMs ?? 2.5 * 60_000;
   const maxBalances = options.maxBalances ?? 5;
   const maxProtocols = options.maxProtocols ?? 5;
   const report = {
@@ -299,7 +299,7 @@ async function main() {
   }, {
     rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),
     protocolWalletId: env.PROTOCOL_WALLET_ID,
-    freshMs: 6 * 60_000,
+    freshMs: 2.5 * 60_000,
     maxBalances: 5,
     maxProtocols: 5,
     budgetMs: 16 * 60_000,

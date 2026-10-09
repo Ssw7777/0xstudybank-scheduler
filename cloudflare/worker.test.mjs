@@ -73,7 +73,7 @@ test('paused wallet polling does not call the public provider but still takes sc
   globalThis.fetch = async url => {
     paths.push(String(url));
     if (String(url).endsWith('/api/status')) {
-      return Response.json({ walletsOver20min: 0, oldestWalletAgeSeconds: 100, oldestProtocolAgeSeconds: 100 });
+      return Response.json({ walletsOver5min: 0, walletsOver20min: 0, oldestWalletAgeSeconds: 60, oldestProtocolAgeSeconds: 60 });
     }
     assert.ok(String(url).includes('mode=fast'));
     return Response.json({ ok: true, ran: 'fast' });
@@ -100,7 +100,7 @@ test('cloud trigger dispatches stale wallets once using only the existing workfl
     urls.push(url);
     if(url.endsWith('/api/status')) {
       assert.equal(options.headers.Authorization,'Bearer test-cron');
-      return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000,walletsOver20min:15});
+      return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000,walletsOver5min:15,walletsOver20min:15});
     }
     assert.equal(options.headers.Authorization,'Bearer test-github');
     if(url.includes('/runs?')) return Response.json({workflow_runs:[]});
@@ -116,7 +116,7 @@ test('RPC quantity lane runs independently while public wallet polling is paused
   const original=globalThis.fetch,paths=[];
   globalThis.fetch=async(url)=>{
     paths.push(String(url));
-    if(String(url).endsWith('/api/status')) return Response.json({walletsOver20min:0,oldestWalletAgeSeconds:100,oldestProtocolAgeSeconds:100});
+    if(String(url).endsWith('/api/status')) return Response.json({walletsOver5min:0,walletsOver20min:0,oldestWalletAgeSeconds:60,oldestProtocolAgeSeconds:60});
     return Response.json({ok:true,chains:[{chain:'eth',failed:0}]});
   };
   try{
@@ -131,7 +131,7 @@ test('Web3 lane is cloud-triggered without wallet addresses or keys in worker, i
   const original=globalThis.fetch,paths=[];
   globalThis.fetch=async(url,options)=>{
     paths.push(String(url));assert.equal(options.headers.Authorization,'Bearer test');
-    if(String(url).endsWith('/api/status')) return Response.json({walletsOver20min:0,oldestWalletAgeSeconds:100,oldestProtocolAgeSeconds:100});
+    if(String(url).endsWith('/api/status')) return Response.json({walletsOver5min:0,walletsOver20min:0,oldestWalletAgeSeconds:60,oldestProtocolAgeSeconds:60});
     return Response.json({ok:true,ran:'web3-observations',updated:5});
   };
   try{
@@ -148,14 +148,14 @@ test('cloud trigger does not duplicate queued/running jobs or fresh data', async
     let calls=0;
     const result=await dispatchWalletWorkflow(env,Date.now(),async url=>{
       calls++;
-      if(url.endsWith('/api/status')) return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000,walletsOver20min:15});
+      if(url.endsWith('/api/status')) return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000,walletsOver5min:15,walletsOver20min:15});
       assert.ok(url.includes('/runs?'));
       return Response.json({workflow_runs:[{status:state}]});
     });
     assert.equal(result,'already_running');
     assert.equal(calls,2);
   }
-  assert.equal(await dispatchWalletWorkflow(env,Date.now(),async()=>Response.json({oldestWalletAgeSeconds:100,oldestProtocolAgeSeconds:200,walletsOver20min:0})),'data_current');
+  assert.equal(await dispatchWalletWorkflow(env,Date.now(),async()=>Response.json({oldestWalletAgeSeconds:100,oldestProtocolAgeSeconds:200,walletsOver5min:0,walletsOver20min:0})),'data_current');
 });
 
 test('GitHub rejection is reported without leaking credentials or retrying', async () => {
@@ -169,7 +169,7 @@ test('GitHub rejection is reported without leaking credentials or retrying', asy
 
 test('a recently failed workflow cools down instead of launching new runners', async () => {
   const result=await dispatchWalletWorkflow({GITHUB_DISPATCH_ENABLED:'true',GITHUB_TOKEN:'test',CRON_SECRET:'test'},Date.now(),async url=>{
-    if(url.endsWith('/api/status')) return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000,walletsOver20min:10});
+    if(url.endsWith('/api/status')) return Response.json({oldestWalletAgeSeconds:1000,oldestProtocolAgeSeconds:1000,walletsOver5min:10,walletsOver20min:10});
     assert.ok(url.includes('/runs?'));
     return Response.json({workflow_runs:[{status:'completed',conclusion:'failure',updated_at:new Date().toISOString()}]});
   });

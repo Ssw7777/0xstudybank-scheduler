@@ -15,10 +15,11 @@ export async function dispatchWalletWorkflow(env, now = Date.now(), request = fe
   });
   if (!statusResponse.ok) throw new Error(`scheduler_status_http_${statusResponse.status}`);
   const status = await statusResponse.json();
-  // Keep dispatching until wallet totals and protocols are inside the 20-minute goal.
-  if (status.oldestWalletAgeSeconds !== null && status.oldestWalletAgeSeconds < 480 &&
-      status.oldestProtocolAgeSeconds !== null && status.oldestProtocolAgeSeconds < 600 &&
-      Number(status.walletsOver20min || 0) === 0) return 'data_current';
+  // Keep dispatching until wallet totals are inside the 5-minute goal (protocols softer).
+  const overTarget = Number(status.walletsOver5min ?? status.walletsOver20min ?? 0);
+  if (status.oldestWalletAgeSeconds !== null && status.oldestWalletAgeSeconds < 150 &&
+      status.oldestProtocolAgeSeconds !== null && status.oldestProtocolAgeSeconds < 300 &&
+      overTarget === 0) return 'data_current';
   const headers = { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json', 'User-Agent': 'studybank-cloud-scheduler', 'X-GitHub-Api-Version': '2022-11-28' };
   const response = await request(`${WORKFLOW}/runs?per_page=10`, { headers, redirect: 'manual', signal: AbortSignal.timeout(20000) });
   if (!response.ok) throw new Error(`github_runs_http_${response.status}`);
@@ -161,10 +162,11 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
       });
       if (statusResponse.ok) {
         const status = await statusResponse.json();
-        const over20 = Number(status.walletsOver20min || 0);
+        const over5 = Number(status.walletsOver5min ?? status.walletsOver10min ?? status.walletsOver20min ?? 0);
         const oldest = status.oldestWalletAgeSeconds;
-        if (over20 > 0 || (oldest !== null && oldest > 600)) {
-          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=1&staleMinutes=6`, {
+        // 15 active EVM wallets → budget=3/min keeps oldest near ≤5m via OKX/Zerion calibrate-first.
+        if (over5 > 0 || (oldest !== null && oldest > 90)) {
+          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=3&staleMinutes=2`, {
             method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-wb-${minute}-${execution}` },
           }, 55000);
           walletBatch = result.ok && result.reason !== 'refresh_in_progress'
