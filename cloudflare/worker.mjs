@@ -164,9 +164,9 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
         const status = await statusResponse.json();
         const over5 = Number(status.walletsOver5min ?? status.walletsOver10min ?? status.walletsOver20min ?? 0);
         const oldest = status.oldestWalletAgeSeconds;
-        // 15 active EVM wallets → budget=3/min keeps oldest near ≤5m via OKX/Zerion calibrate-first.
-        if (over5 > 0 || (oldest !== null && oldest > 90)) {
-          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=3&staleMinutes=2`, {
+        // 15 active EVM → budget=3 + stale≥1m picks the aging tail; calibrate-first touches flaps.
+        if (over5 > 0 || (oldest !== null && oldest > 60)) {
+          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=3&staleMinutes=1`, {
             method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-wb-${minute}-${execution}` },
           }, 55000);
           walletBatch = result.ok && result.reason !== 'refresh_in_progress'
