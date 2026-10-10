@@ -62,13 +62,14 @@ fetch_targets() {
 const fs = require("fs");
 const body = JSON.parse(fs.readFileSync(process.env.TARGETS_FILE, "utf8"));
 if (body.ok !== true || !Array.isArray(body.wallets)) process.exit(1);
-// Five shards may each process at most five addresses in a cycle.
-if (body.wallets.length !== 25) {
-  console.log(`::error title=Wallet manifest::Expected 25 addresses, received ${body.wallets.length}.`);
+// Active (non-paused) targets only; Abstract pause can shrink below the old 25.
+const n = body.wallets.length;
+if (!Number.isInteger(n) || n < 1 || n > 50) {
+  console.log(`::error title=Wallet manifest::Expected 1-50 active addresses, received ${n}.`);
   process.exit(1);
 }
 const addresses = body.wallets.map((wallet) => String(wallet && wallet.address || "").toLowerCase());
-if (new Set(addresses).size !== 25) {
+if (new Set(addresses).size !== n) {
   console.log("::error title=Wallet manifest::The manifest contains duplicate addresses.");
   process.exit(1);
 }

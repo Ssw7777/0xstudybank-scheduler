@@ -175,7 +175,8 @@ jobs:
             failures.push(`latest snapshot is ${status.refreshAgeSeconds ?? "unknown"} seconds old`);
           }
           if (!Number.isInteger(status.snapshotCount) || status.snapshotCount < 1) failures.push("no portfolio snapshot exists");
-          const count = Number(status.walletCount);
+          // Prefer active (non-paused) wallets: Abstract pause shrinks targets below walletCount.
+          const count = Number(status.activeWalletCount ?? status.walletCount);
           if (!Number.isInteger(count) || count < 1 || count > 50) failures.push("invalid configured wallet count");
           const over5 = Number(status.walletsOver5min ?? status.walletsOver20min ?? 0);
           if (over5 !== 0) failures.push(`${over5} wallets exceed the requested 5-minute limit`);
@@ -198,8 +199,8 @@ jobs:
           if (!audit || typeof audit !== "object") {
             tokenWarnings.push("token audit status unavailable; token quantities are not verified");
           } else {
-            if (Number(audit.freshWallets) !== Number(status.walletCount)) {
-              tokenWarnings.push(`only ${audit.freshWallets ?? "unknown"}/${status.walletCount} wallets have fresh token quantities`);
+            if (Number(audit.freshWallets) !== count) {
+              tokenWarnings.push(`only ${audit.freshWallets ?? "unknown"}/${count} wallets have fresh token quantities`);
             }
             for (const field of ["staleWallets", "failedWallets", "missingWallets", "invalidRows", "duplicateRows", "aggregateMismatches"]) {
               if (!Number.isInteger(audit[field]) || audit[field] !== 0) tokenWarnings.push(`token ${field}: ${audit[field] ?? "unknown"}`);
