@@ -166,7 +166,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
         const oldest = status.oldestWalletAgeSeconds;
         // 15 active EVM → budget=3 + stale≥1m picks the aging tail; calibrate-first touches flaps.
         if (over5 > 0 || (oldest !== null && oldest > 60)) {
-          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=3&staleMinutes=1`, {
+          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=1&staleMinutes=2`, {
             method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-wb-${minute}-${execution}` },
           }, 55000);
           walletBatch = result.ok && result.reason !== 'refresh_in_progress'
