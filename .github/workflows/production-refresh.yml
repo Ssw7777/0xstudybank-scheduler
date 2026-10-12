@@ -4,7 +4,7 @@ on:
   # VPS is primary (systemd cron for fast/rpc/web3/wallet-batch).
   # This workflow remains the wallet-total collector (Rabby from GH runners).
   schedule:
-    - cron: "3,13,23,33,43,53 * * * *"
+    - cron: "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
   workflow_dispatch:
     inputs:
       wallet_only:
@@ -36,7 +36,7 @@ env:
 jobs:
   fast-refresh:
     name: fast-refresh
-    if: ${{ inputs.wallet_only != true }}
+    if: ${{ inputs.wallet_only != true && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -89,7 +89,7 @@ jobs:
   refresh-wallets:
     name: oldest-first-wallet-cycle
     needs: fast-refresh
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
     runs-on: ubuntu-latest
     # Includes the bounded collection budget and write retries; normal completion
     # does not wait for this limit.
@@ -116,7 +116,7 @@ jobs:
   finalize:
     name: verify-production-freshness
     needs: [fast-refresh, refresh-wallets]
-    if: ${{ always() && needs.refresh-wallets.outputs.allowed == 'true' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '3,13,23,33,43,53 * * * *') }}
+    if: ${{ always() && needs.refresh-wallets.outputs.allowed == 'true' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
