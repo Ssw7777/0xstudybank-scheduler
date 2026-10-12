@@ -1,5 +1,10 @@
 # 0xStudyBank cloud scheduler
 
+> **Cutover 2026-10-13:** Primary dashboard is **http://43.167.222.67** (Tencent Lighthouse VPS).
+> Refresh clock runs on the VPS (`studybank-refresh.timer`). This repo's GitHub Actions
+> still collect wallet totals and write observations to the VPS. Cloudflare Workers
+> `0xstudy` / `studybank-refresh` are retired.
+
 This public repository contains only the secret-free scheduler for the private
 0xStudyBank dashboard. It does not contain wallet addresses, balances, API keys,
 dashboard credentials, or application source code.

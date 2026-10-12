@@ -1,4 +1,4 @@
-const SITE = 'https://0xstudy.0xstudybank.workers.dev';
+const SITE = 'http://43.167.222.67';
 const siteFetch = (env, url, init) => {
   const target = new URL(url, SITE);
   if (env.DASHBOARD && target.origin === SITE) {

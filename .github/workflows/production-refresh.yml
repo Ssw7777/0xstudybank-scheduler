@@ -1,9 +1,10 @@
 name: Production data refresh
 
 on:
-  # Cloudflare is the one-minute cloud clock. It dispatches this workflow only
-  # when wallet totals are due; its own five-minute CEX lane records snapshots.
-  # A second GitHub schedule duplicated CEX work and burned Vercel Hobby CPU.
+  # VPS is primary (systemd cron for fast/rpc/web3/wallet-batch).
+  # This workflow remains the wallet-total collector (Rabby from GH runners).
+  schedule:
+    - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch:
     inputs:
       wallet_only:
@@ -22,11 +23,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  OIDC_AUDIENCE: https://0xstudy.0xstudybank.workers.dev
-  FAST_URL: https://0xstudy.0xstudybank.workers.dev/api/cron/refresh?mode=fast
-  TARGETS_URL: https://0xstudy.0xstudybank.workers.dev/api/cron/wallet-targets
-  OBSERVATION_URL: https://0xstudy.0xstudybank.workers.dev/api/cron/wallet-observation
-  STATUS_URL: https://0xstudy.0xstudybank.workers.dev/api/status
+  OIDC_AUDIENCE: http://43.167.222.67
+  FAST_URL: http://43.167.222.67/api/cron/refresh?mode=fast
+  TARGETS_URL: http://43.167.222.67/api/cron/wallet-targets
+  OBSERVATION_URL: http://43.167.222.67/api/cron/wallet-observation
+  STATUS_URL: http://43.167.222.67/api/status
   RABBY_TOTAL_URL: https://api.rabby.io/v1/user/total_balance
   RABBY_PROTOCOL_URL: https://api.rabby.io/v1/user/complex_protocol_list
   RABBY_TOKEN_URL: https://api.rabby.io/v1/user/token_list
