@@ -14,7 +14,7 @@ test('ten shards cover all wallets exactly once, including 25 and 50 addresses',
 
 test('busy persistence retries the original body and respects Retry-After', async () => {
   const waits = [], bodies = [];
-  const result = await jsonRequest('https://0xstudybank.0xstudybank.workers.dev/api/cron/wallet-observation', { method: 'POST', body: '{"observedAt":"original"}' }, 1000, {
+  const result = await jsonRequest('https://0xstudy.0xstudybank.workers.dev/api/cron/wallet-observation', { method: 'POST', body: '{"observedAt":"original"}' }, 1000, {
     sleep: async ms => waits.push(ms),
     fetch: async (_, options) => {
       bodies.push(options.body);
@@ -29,7 +29,7 @@ test('busy persistence retries the original body and respects Retry-After', asyn
 
 test('202 skipped refresh is retried, not marked complete', async () => {
   let calls = 0;
-  const result = await jsonRequest('https://0xstudybank.0xstudybank.workers.dev/api/cron/refresh', {}, 1000, {
+  const result = await jsonRequest('https://0xstudy.0xstudybank.workers.dev/api/cron/refresh', {}, 1000, {
     sleep: async () => {},
     fetch: async () => ++calls === 1 ? Response.json({ reason: 'refresh_in_progress' }, { status: 202 }) : Response.json({ ok: true }),
   });
@@ -40,7 +40,7 @@ test('202 skipped refresh is retried, not marked complete', async () => {
 test('validation, authorization and redirect errors are never retried', async () => {
   for (const status of [401, 403, 422, 302]) {
     let calls = 0;
-    await assert.rejects(jsonRequest('https://0xstudybank.0xstudybank.workers.dev/api/cron/wallet-observation', {}, 1000, {
+    await assert.rejects(jsonRequest('https://0xstudy.0xstudybank.workers.dev/api/cron/wallet-observation', {}, 1000, {
       fetch: async () => { calls++; return new Response('', { status }); },
       sleep: async () => assert.fail('unexpected retry'),
     }));
@@ -50,7 +50,7 @@ test('validation, authorization and redirect errors are never retried', async ()
 
 test('retry exhaustion is bounded and does not report success', async () => {
   let calls = 0;
-  await assert.rejects(jsonRequest('https://0xstudybank.0xstudybank.workers.dev/api/cron/wallet-observation', {}, 1000, {
+  await assert.rejects(jsonRequest('https://0xstudy.0xstudybank.workers.dev/api/cron/wallet-observation', {}, 1000, {
     sleep: async () => {}, fetch: async () => { calls++; return new Response('', { status: 503 }); },
   }));
   assert.equal(calls, 7);
@@ -123,7 +123,7 @@ test('RPC quantity lane runs independently while public wallet polling is paused
     const result=await runCycle({CRON_SECRET:'test',WALLET_POLLING_ENABLED:'false',RPC_POLLING_ENABLED:'true'},60000);
     assert.equal(result.rpc,'accepted');
     assert.equal(result.walletBatch,'data_current');
-    assert.deepEqual(paths.filter(p=>p.includes('rpc-refresh')),['https://0xstudybank.0xstudybank.workers.dev/api/cron/rpc-refresh']);
+    assert.deepEqual(paths.filter(p=>p.includes('rpc-refresh')),['https://0xstudy.0xstudybank.workers.dev/api/cron/rpc-refresh']);
   }finally{globalThis.fetch=original;}
 });
 
@@ -138,7 +138,7 @@ test('Web3 lane is cloud-triggered without wallet addresses or keys in worker, i
     const result=await runCycle({CRON_SECRET:'test',WALLET_POLLING_ENABLED:'false',WEB3_POLLING_ENABLED:'true'},60000);
     assert.equal(result.web3,'accepted');
     assert.equal(result.walletBatch,'data_current');
-    assert.deepEqual(paths.filter(p=>p.includes('web3-refresh')),['https://0xstudybank.0xstudybank.workers.dev/api/cron/web3-refresh']);
+    assert.deepEqual(paths.filter(p=>p.includes('web3-refresh')),['https://0xstudy.0xstudybank.workers.dev/api/cron/web3-refresh']);
   }finally{globalThis.fetch=original;}
 });
 
