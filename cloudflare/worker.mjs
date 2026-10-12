@@ -1,4 +1,13 @@
 const SITE = 'https://0xstudy.0xstudybank.workers.dev';
+const siteFetch = (env, url, init) => {
+  const target = new URL(url, SITE);
+  if (env.DASHBOARD && target.origin === SITE) {
+    // Same-account workers.dev fetch returns 404/1042; use service binding instead.
+    return env.DASHBOARD.fetch(new Request(target.toString(), init));
+  }
+  return fetch(url, init);
+};
+
 const RABBY = 'https://api.rabby.io/v1/user';
 const WORKFLOW = 'https://api.github.com/repos/Ssw7777/0xstudybank-scheduler/actions/workflows/production-refresh.yml';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -10,10 +19,14 @@ export function selectShard(wallets, minute) {
 export async function dispatchWalletWorkflow(env, now = Date.now(), request = fetch) {
   if (env.GITHUB_DISPATCH_ENABLED !== 'true') return 'disabled';
   if (!env.GITHUB_TOKEN) throw new Error('github_scheduler_secret_missing');
-  const statusResponse = await request(`${SITE}/api/status`, {
-    headers: { Authorization: `Bearer ${env.CRON_SECRET}` }, redirect: 'manual', signal: AbortSignal.timeout(20000),
-  });
-  if (!statusResponse.ok) throw new Error(`scheduler_status_http_${statusResponse.status}`);
+  const statusResponse = await (request === fetch
+    ? siteFetch(env, `${SITE}/api/status`, {
+        headers: { Authorization: `Bearer ${env.CRON_SECRET}` }, redirect: 'manual', signal: AbortSignal.timeout(20000),
+      })
+    : request(`${SITE}/api/status`, {
+        headers: { Authorization: `Bearer ${env.CRON_SECRET}` }, redirect: 'manual', signal: AbortSignal.timeout(20000),
+      }));
+  if (!statusResponse.ok) throw new Error(`scheduler_status_http_${statusResponse.status}_host_${new URL(SITE).hostname}`);
   const status = await statusResponse.json();
   // Keep dispatching until wallet totals are inside the 5-minute goal (protocols softer).
   const overTarget = Number(status.walletsOver5min ?? status.walletsOver20min ?? 0);
@@ -39,9 +52,9 @@ export async function dispatchWalletWorkflow(env, now = Date.now(), request = fe
 }
 
 export async function jsonRequest(url, options = {}, timeout = 20000, runtime = {}) {
-  const request = runtime.fetch ?? fetch;
   const wait = runtime.sleep ?? sleep;
   const isSite = new URL(url).origin === SITE;
+  const request = runtime.fetch ?? ((isSite && runtime.env) ? ((u, init) => siteFetch(runtime.env, u, init)) : fetch);
   // Retry the SAME collected payload, never replace a failed read with zero.
   // 2+4+8+12+12+12 seconds covers the normal 45-second ingestion lease.
   const delays = isSite ? [2000, 4000, 8000, 12000, 12000, 12000] : [3000];
@@ -83,10 +96,11 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
   const slot = manualSlot ?? minute % 10;
   const headers = { Authorization: `Bearer ${env.CRON_SECRET}`, 'Content-Type': 'application/json' };
   const walletPolling = env.WALLET_POLLING_ENABLED !== 'false';
+  const siteReq = (url, options = {}, timeout = 20000) => jsonRequest(url, options, timeout, { env });
   if (!walletPolling && manualSlot !== undefined) throw new Error('wallet_polling_paused_provider_rate_limit');
   let wallets = [];
   if (walletPolling) {
-    const manifest = await jsonRequest(`${SITE}/api/cron/wallet-targets`, { headers });
+    const manifest = await siteReq(`${SITE}/api/cron/wallet-targets`, { headers });
     if (!manifest.ok || !Array.isArray(manifest.wallets) || manifest.wallets.length > 50 || !manifest.wallets.length) throw new Error('invalid_manifest');
     const addresses = manifest.wallets.map(w => w.address);
     if (new Set(addresses).size !== addresses.length || addresses.some(a => !/^0x[a-f0-9]{40}$/.test(a))) throw new Error('invalid_addresses');
@@ -131,7 +145,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
     await sleep(4000);
   }
   if (observations.length) {
-    const accepted = await jsonRequest(`${SITE}/api/cron/wallet-observation`, {
+    const accepted = await siteReq(`${SITE}/api/cron/wallet-observation`, {
       method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-${minute}-${slot}-${execution}` },
       body: JSON.stringify({ observations }),
     }, 30000);
@@ -142,13 +156,13 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
   let web3='disabled';
   if(env.WEB3_POLLING_ENABLED==='true' && manualSlot===undefined){
     try{
-      const checked=await jsonRequest(`${SITE}/api/cron/web3-refresh`,{method:'POST',headers},55000);
+      const checked=await siteReq(`${SITE}/api/cron/web3-refresh`,{method:'POST',headers},55000);
       web3=checked.ok===true?'accepted':'partial';
     }catch(error){web3='failed';failures.push({stage:'web3',reason:String(error?.message??'web3_failed').slice(0,160)});}
   }
   if(env.RPC_POLLING_ENABLED==='true' && manualSlot===undefined){
     try{
-      const checked=await jsonRequest(`${SITE}/api/cron/rpc-refresh`,{method:'POST',headers},55000);
+      const checked=await siteReq(`${SITE}/api/cron/rpc-refresh`,{method:'POST',headers},55000);
       rpc=checked.ok===true?(checked.chains?.some(c=>c.failed>0)?'partial':'accepted'):'failed';
     }catch(error){rpc='failed';failures.push({stage:'rpc',reason:String(error?.message??'rpc_failed').slice(0,160)});}
   }
@@ -157,7 +171,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
   // Does not call Rabby from the Worker; Vercel uses OKX/Zerion then Rabby.
   if (manualSlot === undefined) {
     try {
-      const statusResponse = await fetch(`${SITE}/api/status`, {
+      const statusResponse = await siteFetch(env, `${SITE}/api/status`, {
         headers: { Authorization: `Bearer ${env.CRON_SECRET}` }, redirect: 'manual', signal: AbortSignal.timeout(15000),
       });
       if (statusResponse.ok) {
@@ -166,7 +180,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
         const oldest = status.oldestWalletAgeSeconds;
         // 15 active EVM → budget=3 + stale≥1m picks the aging tail; calibrate-first touches flaps.
         if (over5 > 0 || (oldest !== null && oldest > 60)) {
-          const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=1&staleMinutes=2`, {
+          const result = await siteReq(`${SITE}/api/cron/refresh?mode=wallet-batch&walletBudget=1&staleMinutes=2`, {
             method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-wb-${minute}-${execution}` },
           }, 55000);
           walletBatch = result.ok && result.reason !== 'refresh_in_progress'
@@ -189,7 +203,7 @@ export async function runCycle(env, scheduledTime = Date.now(), manualSlot) {
     catch (error) { walletDispatch = 'failed'; failures.push({ stage: 'dispatch', reason: String(error?.message ?? 'dispatch_failed').slice(0, 160) }); }
   }
   if (minute % 5 === 0 && manualSlot === undefined) {
-    const result = await jsonRequest(`${SITE}/api/cron/refresh?mode=fast`, {
+    const result = await siteReq(`${SITE}/api/cron/refresh?mode=fast`, {
       method: 'POST', headers: { ...headers, 'X-Idempotency-Key': `cf-fast-${minute}-${execution}` },
     }, 55000);
     snapshot = result.ok && result.reason !== 'refresh_in_progress' ? 'accepted' : 'not_completed';
@@ -221,7 +235,10 @@ export default {
     if (!['/run','/wake'].includes(url.pathname) || request.method !== 'POST' || !(await authorized(request, env.CRON_SECRET))) return new Response('Not found', { status: 404 });
     if (url.pathname === '/wake') {
       try { return Response.json({ walletDispatch: await dispatchWalletWorkflow(env) }); }
-      catch { return Response.json({ error: 'workflow_wake_failed' }, { status: 502 }); }
+      catch (error) {
+        const reason = error instanceof Error ? error.message.replaceAll(env.CRON_SECRET || '', '[redacted]').slice(0, 240) : 'workflow_wake_failed';
+        return Response.json({ error: 'workflow_wake_failed', reason }, { status: 502 });
+      }
     }
     const slot = Number(url.searchParams.get('slot'));
     if (!url.searchParams.has('slot') || !Number.isInteger(slot) || slot < 0 || slot > 9) return new Response('Invalid slot', { status: 400 });
