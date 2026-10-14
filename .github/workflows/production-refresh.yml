@@ -24,10 +24,10 @@ concurrency:
 
 env:
   OIDC_AUDIENCE: http://43.167.222.67
-  FAST_URL: http://43.167.222.67/api/cron/refresh?mode=fast
-  TARGETS_URL: http://43.167.222.67/api/cron/wallet-targets
-  OBSERVATION_URL: http://43.167.222.67/api/cron/wallet-observation
-  STATUS_URL: http://43.167.222.67/api/status
+  FAST_URL: https://0xstudy.top/api/cron/refresh?mode=fast
+  TARGETS_URL: https://0xstudy.top/api/cron/wallet-targets
+  OBSERVATION_URL: https://0xstudy.top/api/cron/wallet-observation
+  STATUS_URL: https://0xstudy.top/api/status
   RABBY_TOTAL_URL: https://api.rabby.io/v1/user/total_balance
   RABBY_PROTOCOL_URL: https://api.rabby.io/v1/user/complex_protocol_list
   RABBY_TOKEN_URL: https://api.rabby.io/v1/user/token_list
