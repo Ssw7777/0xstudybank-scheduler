@@ -278,6 +278,9 @@ async function main() {
         const url = new URL(endpoints[stage]);
         if (stage !== 'tokens') url.searchParams.set('id', wallet.address);
         if (stage === 'discovery') { url.searchParams.set('chain_id', extra); url.searchParams.set('is_all', 'true'); }
+        if (stage === 'balance' && providerRequests >= 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
         const response = await fetch(url, {
           method: stage === 'tokens' ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(25_000),
           headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': '0xstudybank-scheduler/3.0' },
