@@ -299,8 +299,8 @@ async function main() {
   }, {
     rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),
     protocolWalletId: env.PROTOCOL_WALLET_ID,
-    freshMs: 2.5 * 60_000,
-    maxBalances: 8,
+    freshMs: 2 * 60_000,
+    maxBalances: 10,
     maxProtocols: 2,
     budgetMs: 16 * 60_000,
   });

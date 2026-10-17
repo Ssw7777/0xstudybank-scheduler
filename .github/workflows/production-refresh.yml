@@ -4,7 +4,7 @@ on:
   # VPS is primary (systemd cron for fast/rpc/web3/wallet-batch).
   # This workflow remains the wallet-total collector (Rabby from GH runners).
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/3 * * * *"
   workflow_dispatch:
     inputs:
       wallet_only:
