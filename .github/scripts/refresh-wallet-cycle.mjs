@@ -300,8 +300,8 @@ async function main() {
     rotation: Number(env.GITHUB_RUN_NUMBER ?? 0),
     protocolWalletId: env.PROTOCOL_WALLET_ID,
     freshMs: 2 * 60_000,
-    maxBalances: 10,
-    maxProtocols: 2,
+    maxBalances: 12,
+    maxProtocols: 1,
     budgetMs: 16 * 60_000,
   });
   console.log(JSON.stringify(report));
